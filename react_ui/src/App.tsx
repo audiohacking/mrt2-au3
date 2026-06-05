@@ -151,7 +151,6 @@ export default function App() {
   const [resourcesMissing, setResourcesMissing] = useState(false);
   const [resourcesProgress, setResourcesProgress] = useState<any>(null);
   const [isFetchingModels, setIsFetchingModels] = useState(true);
-  const [debugLogs, setDebugLogs] = useState<string[]>([]);
 
 
   const [bankStatus, setBankStatus] = useState([false, false, false]);
@@ -444,9 +443,6 @@ export default function App() {
       if (state.resourcesMissing !== undefined) setResourcesMissing(state.resourcesMissing);
       if (state.resourcesProgress !== undefined) setResourcesProgress(state.resourcesProgress);
       if (state.downloadPath !== undefined) setDownloadPath(state.downloadPath);
-      if (state.debugLog !== undefined) {
-        setDebugLogs(prev => [...prev.slice(-199), String(state.debugLog)]);
-      }
 
       if (state.bankStatus !== undefined) setBankStatus(state.bankStatus);
       if (state.midiSources !== undefined) setMidiSources(state.midiSources);
@@ -1400,33 +1396,6 @@ export default function App() {
           onSelectFolder={() => postMessage({ type: 'selectDownloadFolder' })}
           onStartDownload={(modelName) => postMessage({ type: 'initResources', modelName })}
         />
-      )}
-
-      {debugLogs.length > 0 && (
-        <div
-          style={{
-            position: 'fixed',
-            right: 8,
-            bottom: 8,
-            width: 440,
-            maxHeight: 160,
-            overflow: 'auto',
-            padding: '8px 10px',
-            background: 'rgba(0,0,0,0.88)',
-            border: '1px solid rgba(113,250,222,0.35)',
-            borderRadius: 8,
-            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-            fontSize: 10,
-            lineHeight: 1.35,
-            color: '#71fade',
-            zIndex: 10000,
-            pointerEvents: 'none',
-          }}
-        >
-          {debugLogs.map((line, i) => (
-            <div key={i}>{line}</div>
-          ))}
-        </div>
       )}
 
     </div>

@@ -945,14 +945,14 @@ static NSString* bankFilePathAU(int index) {
 }
 
 - (void)addDebugLog:(NSString*)msg {
-    dispatch_async(dispatch_get_main_queue(), ^{
 #if MAGENTART_DEBUG_LOG
+    dispatch_async(dispatch_get_main_queue(), ^{
         if (self->_debugLabel) {
             self->_debugLabel.stringValue = [self->_debugLabel.stringValue stringByAppendingFormat:@"%@\n", msg];
         }
-#endif
         [self sendStateUpdate:@{@"debugLog": msg}];
     });
+#endif
 }
 
 - (void)writeDiskLog:(NSString*)msg {
@@ -987,9 +987,13 @@ static NSString* bankFilePathAU(int index) {
     if (accessGranted) {
         [modelsDir stopAccessingSecurityScopedResource];
     }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self->_debugLabel) {
+            self->_debugLabel.stringValue = [self->_debugLabel.stringValue stringByAppendingFormat:@"%@\n", msg];
+        }
+        [self sendStateUpdate:@{@"debugLog": msg}];
+    });
 #endif
-
-    [self sendStateUpdate:@{@"debugLog": msg}];
 }
 
 - (void)loadView {

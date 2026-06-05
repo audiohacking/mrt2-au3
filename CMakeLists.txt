@@ -176,8 +176,6 @@ endfunction()
 option(MAGENTART_DEBUG_LOG "Enable AUv3 debug overlay + mrt_debug.log file writer" OFF)
 if(MAGENTART_DEBUG_LOG)
   add_compile_definitions(MAGENTART_DEBUG_LOG=1)
-else()
-  add_compile_definitions(MAGENTART_DEBUG_LOG=0)
 endif()
 
 add_custom_target(npm_install_root

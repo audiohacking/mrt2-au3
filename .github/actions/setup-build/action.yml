@@ -17,7 +17,7 @@ runs:
       uses: actions/cache@v4
       with:
         path: ${{ github.workspace }}/.ccache
-        key: mrt2-au3-ccache-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'magenta-realtime/core/**', 'MagentaRT_AudioUnit.mm', 'MagentaRT_AUHostApp.mm') }}
+        key: mrt2-au3-ccache-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'magenta-realtime/core/**', 'MagentaRT_AudioUnit.mm', 'MagentaRT_AUHostApp.mm', 'react_ui/src/App.tsx') }}
         restore-keys: |
           mrt2-au3-ccache-${{ runner.os }}-
 
