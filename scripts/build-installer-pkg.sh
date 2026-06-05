@@ -1,20 +1,18 @@
 #!/usr/bin/env bash
 # Build macOS release artefacts for the MRT2 AUv3 host app:
+#   - .dmg disk image (drag MRT2 (AU).app to Applications)
 #   - .pkg installer (installs to /Applications and registers the AU extension)
-#   - .dmg disk image (drag MRT2 (AU).app to Applications — no zip)
 #
 # Run from repo root after:
 #   cmake --build build --target package_mrt2_au
 #
-# Uses a single app copy (build/dist by default) to minimize peak disk usage.
+# Uses a single app copy (build/dist by default). DMG is built before PKG and
+# uses an explicitly sized read-write image — hdiutil -srcfolder often creates
+# a volume that is too small for signed .appex bundles (mlx.metallib copied last).
 #
 # Usage:
 #   ./scripts/build-installer-pkg.sh [--version 0.1.0] [--app path/to/MRT2\ \(AU\).app]
 #   ./scripts/build-installer-pkg.sh --sign-app
-#
-# Output (under release-artifacts/ by default):
-#   MRT2-AU3-<version>-macOS-Installer.pkg
-#   MRT2-AU3-<version>-macOS.dmg
 
 set -euo pipefail
 
@@ -23,6 +21,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 APP_BUNDLE_NAME="MRT2 (AU).app"
+VOL_NAME="MRT2 AU3"
 PKG_ID="com.audiohacking.mrt2-au3"
 OUT_DIR="${OUT_DIR:-release-artifacts}"
 SIGN_APP=false
@@ -36,7 +35,7 @@ while [ $# -gt 0 ]; do
     --app)       APP_PATH="$2"; shift 2 ;;
     --out-dir)   OUT_DIR="$2"; shift 2 ;;
     -h|--help)
-      sed -n '1,20p' "$0"
+      sed -n '1,22p' "$0"
       exit 0
       ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -58,8 +57,6 @@ fi
 
 if [ ! -d "$APP_PATH" ]; then
   echo "Error: app bundle not found at: $APP_PATH" >&2
-  echo "Build first:" >&2
-  echo "  cmake --build build --target package_mrt2_au" >&2
   exit 1
 fi
 
@@ -67,13 +64,60 @@ mkdir -p "$OUT_DIR"
 PKG_FILE="${OUT_DIR}/MRT2-AU3-${PKG_VERSION}-macOS-Installer.pkg"
 DMG_FILE="${OUT_DIR}/MRT2-AU3-${PKG_VERSION}-macOS.dmg"
 
+disk_free() { df -h . | awk 'NR==2 {print $4}'; }
+
+create_dmg_from_app() {
+  local app_path="$1"
+  local dmg_path="$2"
+  local volname="$3"
+
+  local src_mb dmg_mb tmp_rw mount_point dev
+  src_mb=$(du -sm "$app_path" | awk '{print $1}')
+  # Signed bundles + HFS+ metadata need headroom beyond du(1).
+  dmg_mb=$(( src_mb + src_mb / 2 + 256 ))
+  if [ "$dmg_mb" -lt 512 ]; then dmg_mb=512; fi
+
+  tmp_rw="${dmg_path%.dmg}.rw.dmg"
+  mount_point="/Volumes/${volname}"
+  rm -f "$tmp_rw" "$dmg_path"
+
+  echo "Creating ${dmg_mb}MB DMG for ${src_mb}MB app (free: $(disk_free))..."
+  hdiutil create \
+    -size "${dmg_mb}m" \
+    -volname "$volname" \
+    -fs HFS+ \
+    -layout SPUD \
+    -format UDRW \
+    -ov \
+    "$tmp_rw"
+
+  dev=""
+  cleanup_dmg() {
+    if [ -n "$dev" ]; then
+      hdiutil detach "$dev" -quiet 2>/dev/null || hdiutil detach "$dev" -force 2>/dev/null || true
+    fi
+    rm -f "$tmp_rw"
+  }
+  trap cleanup_dmg RETURN
+
+  dev=$(hdiutil attach -readwrite -noverify -noautoopen "$tmp_rw" | awk '/^\/dev\// {print $1; exit}')
+  ditto "$app_path" "${mount_point}/$(basename "$app_path")"
+  sync
+  hdiutil detach "$dev" -quiet
+  dev=""
+
+  hdiutil convert "$tmp_rw" -format UDZO -imagekey zlib-level=9 -o "$dmg_path"
+  rm -f "$tmp_rw"
+  trap - RETURN
+}
+
 echo "=== Packaging from single app copy ==="
 echo "App:  $APP_PATH"
-echo "Free: $(df -h . | awk 'NR==2 {print $4}')"
+echo "Free: $(disk_free)"
 du -sh "$APP_PATH"
 
 if [ "$SIGN_APP" = true ]; then
-  echo "Ad-hoc signing app bundle in place (including mlx.metallib)..."
+  echo "Ad-hoc signing app bundle in place..."
   METALLIB="$(find "$APP_PATH" -name mlx.metallib -print -quit || true)"
   if [ -n "$METALLIB" ]; then
     xcrun codesign --force --sign - "$METALLIB"
@@ -85,11 +129,14 @@ if [ "$SIGN_APP" = true ]; then
   xcrun codesign --force --sign - "$APP_PATH"
 fi
 
-echo "Building .pkg: $PKG_FILE"
+echo "Building .dmg: $DMG_FILE"
+create_dmg_from_app "$APP_PATH" "$DMG_FILE" "$VOL_NAME"
+
+echo "Building .pkg: $PKG_FILE (free: $(disk_free))"
 PAYLOAD_DIR="$(mktemp -d)"
 SCRIPTS_DIR="$(mktemp -d)"
-cleanup_temps() { rm -rf "$PAYLOAD_DIR" "$SCRIPTS_DIR"; }
-trap cleanup_temps EXIT
+cleanup_pkg_temps() { rm -rf "$PAYLOAD_DIR" "$SCRIPTS_DIR"; }
+trap cleanup_pkg_temps EXIT
 
 mkdir -p "${PAYLOAD_DIR}/Applications"
 ditto "$APP_PATH" "${PAYLOAD_DIR}/Applications/${APP_BUNDLE_NAME}"
@@ -104,25 +151,7 @@ pkgbuild \
   --install-location / \
   "$PKG_FILE"
 
-cleanup_temps
-trap - EXIT
-
-echo "Building .dmg: $DMG_FILE"
-echo "Free before hdiutil: $(df -h . | awk 'NR==2 {print $4}')"
-rm -f "$DMG_FILE"
-# -format UDZO compresses; peak usage is lower when no extra staging copy exists.
-hdiutil create \
-  -volname "MRT2 AU3" \
-  -srcfolder "$APP_PATH" \
-  -ov \
-  -format UDZO \
-  "$DMG_FILE"
-
 echo ""
 echo "Created:"
-echo "  ${PKG_FILE} ($(du -h "$PKG_FILE" | awk '{print $1}'))"
 echo "  ${DMG_FILE} ($(du -h "$DMG_FILE" | awk '{print $1}'))"
-echo ""
-echo "Install with GUI: open \"${PKG_FILE}\""
-echo "Install with CLI: sudo installer -pkg \"${PKG_FILE}\" -target /"
-echo "Manual install:   open \"${DMG_FILE}\" and drag ${APP_BUNDLE_NAME} to Applications"
+echo "  ${PKG_FILE} ($(du -h "$PKG_FILE" | awk '{print $1}'))"
