@@ -29,6 +29,7 @@ saved_model/
 # C++ build
 .ccache/
 build/
+release-artifacts/
 *.o
 *.dylib
 

@@ -261,7 +261,6 @@ add_dependencies(mrt2_au_app build_mrt2_ui)
 set(ENTITLEMENTS "${CMAKE_CURRENT_SOURCE_DIR}/Entitlements.plist")
 set(MRT2_AU_APP_BUNDLE_NAME "MRT2 (AU).app")
 set(MRT2_AU_PACKAGE_DIR "${CMAKE_BINARY_DIR}/dist")
-set(MRT2_AU_PACKAGE_ZIP "${CMAKE_BINARY_DIR}/MRT2-AU3-macos-arm64.zip")
 
 # Embed UI + metallib, sign, and write a finished host app bundle.
 function(mrt2_au_add_finalize_bundle_target target_name)
@@ -325,9 +324,7 @@ add_custom_target(package_mrt2_au
   COMMAND ${CMAKE_COMMAND} -E copy
     "${CMAKE_CURRENT_SOURCE_DIR}/PLUGIN.md"
     "${MRT2_AU_PACKAGE_DIR}/PLUGIN.md"
-  COMMAND ${CMAKE_COMMAND} -E rm -f "${MRT2_AU_PACKAGE_ZIP}"
-  COMMAND ditto -c -k "${MRT2_AU_PACKAGE_DIR}" "${MRT2_AU_PACKAGE_ZIP}"
-  COMMENT "Packaging ${MRT2_AU_PACKAGE_ZIP}"
+  COMMENT "Staging ${MRT2_AU_APP_BUNDLE_NAME} in ${MRT2_AU_PACKAGE_DIR}"
   VERBATIM
 )
 

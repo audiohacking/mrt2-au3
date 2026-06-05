@@ -32,9 +32,16 @@ cd mrt2-au3
 
 ## Releases (no local Xcode required)
 
-Pre-built macOS arm64 builds are attached to [GitHub Releases](https://github.com/audiohacking/mrt2-au3/releases). Download the zip, extract `MRT2 (AU).app` to `/Applications` or `~/Applications`, then follow [INSTALL.md](INSTALL.md).
+Pre-built macOS arm64 builds are attached to [GitHub Releases](https://github.com/audiohacking/mrt2-au3/releases):
 
-Release builds are ad-hoc signed. After download, clear quarantine and re-sign locally:
+| Asset | Use |
+|---|---|
+| `MRT2-AU3-<version>-macOS-Installer.pkg` | Double-click (or `sudo installer -pkg … -target /`) — installs to `/Applications` and registers the AU |
+| `MRT2-AU3-<version>-macOS.dmg` | Drag `MRT2 (AU).app` to Applications |
+
+Models are not included — download separately to `~/Documents/Magenta/magenta-rt-v2/` (see upstream [installation docs](https://github.com/magenta/magenta-realtime/blob/main/docs/installation.md)).
+
+Release builds are ad-hoc signed. After download, clear quarantine and re-sign locally if Gatekeeper blocks launch:
 
 ```bash
 xattr -cr "/Applications/MRT2 (AU).app"
@@ -43,7 +50,13 @@ codesign --force --sign - "/Applications/MRT2 (AU).app"
 open "/Applications/MRT2 (AU).app"
 ```
 
-To cut a release: create a new GitHub release (tag + publish). The [Release workflow](.github/workflows/release.yml) builds on `macos-14` and uploads `MRT2-AU3-<tag>-macos-arm64.zip`. Use **Actions → Release → Run workflow** to test packaging without publishing.
+To cut a release: create a new GitHub release (tag + publish). The [Release workflow](.github/workflows/release.yml) builds on `macos-14` and uploads the `.pkg` and `.dmg`. Use **Actions → Release → Run workflow** to test without publishing.
+
+Build installers locally after `package_mrt2_au`:
+
+```bash
+./scripts/build-installer-pkg.sh --version 0.1.0 --sign-app
+```
 
 ## Build locally
 
@@ -63,7 +76,9 @@ Package only (for CI or manual distribution):
 
 ```bash
 cmake --build build --target package_mrt2_au -j10
-# -> build/MRT2-AU3-macos-arm64.zip
+./scripts/build-installer-pkg.sh --version 0.1.0 --sign-app
+# -> release-artifacts/MRT2-AU3-0.1.0-macOS-Installer.pkg
+# -> release-artifacts/MRT2-AU3-0.1.0-macOS.dmg
 ```
 
 Optional debug overlay + disk log:
