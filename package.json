@@ -1,0 +1,8 @@
+{
+  "name": "mrt2-au3",
+  "private": true,
+  "workspaces": [
+    "magenta-realtime/examples/common/react_ui",
+    "react_ui"
+  ]
+}

@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+*.egg
+.venv/
+venv/
+
+# Node
+node_modules/
+
+# audio / model artifacts
+*.wav
+saved_model/
+*.mlpackage/
+*.mlmodel
+*.mlxfn
+*.safetensors
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# macOS
+.DS_Store
+
+# C++ build
+build/
+*.o
+*.dylib
+
+# UI build output (rebuilt by cmake)
+react_ui/dist/

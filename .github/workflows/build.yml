@@ -1,0 +1,57 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE"
+      - ".gitignore"
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE"
+      - ".gitignore"
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-auv3:
+    runs-on: macos-14
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python and CMake
+        run: |
+          uv python install 3.12
+          uv venv --python 3.12
+          source .venv/bin/activate
+          uv pip install "cmake<3.28"
+
+      - name: Configure
+        run: |
+          source .venv/bin/activate
+          cmake . -B build -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+
+      - name: Build AUv3 targets
+        run: |
+          source .venv/bin/activate
+          cmake --build build --target finalize_mrt2_au -j"$(sysctl -n hw.ncpu)"
