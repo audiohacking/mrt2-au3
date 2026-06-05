@@ -27,6 +27,7 @@ saved_model/
 .DS_Store
 
 # C++ build
+.ccache/
 build/
 *.o
 *.dylib

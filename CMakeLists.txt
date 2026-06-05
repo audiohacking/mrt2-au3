@@ -2,6 +2,15 @@ cmake_minimum_required(VERSION 3.27)
 
 set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum OS X deployment version" FORCE)
 
+# Must be set before project() so FetchContent deps (MLX, TFLite, etc.) use ccache too.
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+  set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE STRING "C compiler launcher" FORCE)
+  set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE STRING "C++ compiler launcher" FORCE)
+  set(CMAKE_OBJCXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE STRING "ObjC++ compiler launcher" FORCE)
+  message(STATUS "Using ccache: ${CCACHE_PROGRAM}")
+endif()
+
 project(mrt2-au3 LANGUAGES C CXX OBJCXX)
 
 if(NOT APPLE)
