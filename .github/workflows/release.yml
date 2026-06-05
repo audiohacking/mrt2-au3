@@ -48,6 +48,12 @@ jobs:
           source .venv/bin/activate
           cmake --build build --target package_mrt2_au -j"$(sysctl -n hw.ncpu)"
 
+      - name: Reclaim disk space before packaging
+        shell: bash
+        run: |
+          chmod +x scripts/ci-reclaim-disk.sh
+          ./scripts/ci-reclaim-disk.sh
+
       - name: Build .pkg and .dmg release artefacts
         shell: bash
         run: |
