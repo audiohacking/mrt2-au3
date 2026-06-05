@@ -25,6 +25,11 @@ import {execSync} from 'child_process';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const abs = (relativePath: string) =>
   path.resolve(__dirname, '..', relativePath);
+const repoRoot = path.resolve(__dirname, '../..');
+const commonUiDir = path.join(
+  repoRoot,
+  'magenta-realtime/examples/common/react_ui',
+);
 
 const commitHash = (() => {
   try {
@@ -42,7 +47,7 @@ export default defineConfig(({command}) => ({
   server: {
     port: 62420,
     fs: {
-      allow: ['..'],
+      allow: [abs('..'), commonUiDir, repoRoot],
     },
   },
   logLevel: 'info',
@@ -50,6 +55,7 @@ export default defineConfig(({command}) => ({
   resolve: {
     alias: {
       '@': abs('src'),
+      '@magenta-rt/common': path.join(commonUiDir, 'index.ts'),
       ...(command !== 'build' && { 'fonts': abs('../resources/fonts/') }),
     },
   },

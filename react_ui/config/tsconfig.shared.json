@@ -11,7 +11,7 @@
       "juce/juce": ["src/lib/juce/juce.js"],
       "@/*": ["src/*"],
       "%/*": ["../resources/img/*"],
-      "@magenta-rt/common": ["../common/react_ui/index.ts"]
+      "@magenta-rt/common": ["../magenta-realtime/examples/common/react_ui/index.ts"]
     },
     "types": ["node"],
 

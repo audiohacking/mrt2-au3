@@ -31,6 +31,14 @@ runs:
         echo "CCACHE_SLOPPINESS=clang_index_store,include_file_mtime,include_file_ctime,time_macros,pch_defines" >> "$GITHUB_ENV"
         ccache --zero-stats || true
 
+    - name: Install npm workspaces
+      shell: bash
+      run: npm install
+
+    - name: Validate React UI build
+      shell: bash
+      run: npm run build --workspace=magenta-rt-v2-ui
+
     - uses: astral-sh/setup-uv@v5
       with:
         enable-cache: true
