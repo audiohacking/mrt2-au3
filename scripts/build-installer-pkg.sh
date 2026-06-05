@@ -82,12 +82,12 @@ create_dmg_from_app() {
   rm -f "$tmp_rw" "$dmg_path"
 
   echo "Creating ${dmg_mb}MB DMG for ${src_mb}MB app (free: $(disk_free))..."
+  # Blank read-write image: do not pass -format without -srcfolder (macOS rejects it).
   hdiutil create \
     -size "${dmg_mb}m" \
     -volname "$volname" \
     -fs HFS+ \
     -layout SPUD \
-    -format UDRW \
     -ov \
     "$tmp_rw"
 
