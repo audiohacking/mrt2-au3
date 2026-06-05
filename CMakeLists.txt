@@ -173,7 +173,8 @@ function(magentart_add_notarize_target target_name)
   )
 endfunction()
 
-option(MAGENTART_DEBUG_LOG "Enable AUv3 debug overlay + mrt_debug.log file writer" OFF)
+# Temporary: keep ON until model loading is fixed in the AU sandbox.
+option(MAGENTART_DEBUG_LOG "Enable AUv3 debug overlay + mrt_debug.log file writer" ON)
 if(MAGENTART_DEBUG_LOG)
   add_compile_definitions(MAGENTART_DEBUG_LOG=1)
 else()

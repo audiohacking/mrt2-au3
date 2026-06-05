@@ -81,11 +81,13 @@ cmake --build build --target package_mrt2_au -j10
 # -> release-artifacts/MRT2-AU3-0.1.0-macOS.dmg
 ```
 
-Optional debug overlay + disk log:
+Optional debug overlay + disk log (enabled by default in this fork until model loading is fixed):
 
 ```bash
-cmake . -B build -DMAGENTART_DEBUG_LOG=ON
+cmake . -B build -DMAGENTART_DEBUG_LOG=ON   # default ON; use =OFF to disable
 ```
+
+Logs appear in the plugin UI (bottom-right overlay + native green box) and in `mrt_debug.log` under your models folder (`~/Documents/Magenta/magenta-rt-v2/models/` by default).
 
 ## Updating upstream
 

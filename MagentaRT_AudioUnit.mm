@@ -309,6 +309,10 @@ static BOOL isDevServerRunning(void) {
       _engine.load_musiccoca_model(resourcesPath.c_str(), "musiccoca");
     } else {
         NSLog(@"MagentaRT_AU: Failed to load static assets externally from: %s", resourcesPath.c_str());
+        if (!self.logHistory) {
+            self.logHistory = [NSMutableArray array];
+        }
+        [self.logHistory addObject:[NSString stringWithFormat:@"init_assets FAILED: %s", resourcesPath.c_str()]];
     }
 
     self.maximumFramesToRender = 4096;
@@ -967,8 +971,8 @@ static NSString* bankFilePathAU(int index) {
         }
     }
     if (!modelsDir) {
-        NSArray* paths = [[NSFileManager defaultManager] URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask];
-        modelsDir = [[paths firstObject] URLByAppendingPathComponent:@"MagentaRT/models"];
+        std::string defaultModelsDir = magentart::paths::get_models_dir();
+        modelsDir = [NSURL fileURLWithPath:[NSString stringWithUTF8String:defaultModelsDir.c_str()]];
     }
     NSURL* logURL = [modelsDir URLByAppendingPathComponent:@"mrt_debug.log"];
     NSString* line = [NSString stringWithFormat:@"%@: %@\n", [NSDate date], msg];
@@ -1036,6 +1040,22 @@ static NSString* bankFilePathAU(int index) {
             }
         }
     }
+
+#if MAGENTART_DEBUG_LOG
+    if (!_debugLabel) {
+        _debugLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(8, self.view.bounds.size.height - 128, 520, 120)];
+        _debugLabel.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
+        _debugLabel.editable = NO;
+        _debugLabel.bezeled = YES;
+        _debugLabel.drawsBackground = YES;
+        _debugLabel.backgroundColor = [NSColor colorWithWhite:0.0 alpha:0.88];
+        _debugLabel.textColor = [NSColor colorWithCalibratedRed:0.45 green:0.91 blue:0.55 alpha:1.0];
+        _debugLabel.font = [NSFont monospacedSystemFontOfSize:9 weight:NSFontWeightRegular];
+        _debugLabel.maximumNumberOfLines = 0;
+        _debugLabel.stringValue = @"[mrt_debug.log also written under models dir]\n";
+        [self.view addSubview:_debugLabel positioned:NSWindowAbove relativeTo:_webView];
+    }
+#endif
 }
 
 - (void)viewDidAppear {
@@ -1752,12 +1772,24 @@ static BOOL paramIsBool(AUParameterAddress address) {
     RealtimeRunner* engine = [au engine];
     if (!engine) return NO;
 
+    NSFileManager* fm = [NSFileManager defaultManager];
+    BOOL mlxfnExists = [fm fileExistsAtPath:mlxfnPath];
+    NSString* statePath = [mlxfnPath stringByReplacingOccurrencesOfString:@".mlxfn" withString:@"_state.safetensors"];
+    BOOL stateExists = [fm fileExistsAtPath:statePath];
+    NSString* assetsStatus = [MagentaModelDownloader areSharedResourcesValid] ? @"yes" : @"NO";
+    [self writeDiskLog:[NSString stringWithFormat:@"loadModelAtPath: %@ (mlxfn=%@ state=%@ resources=%@)",
+                        mlxfnPath.lastPathComponent,
+                        mlxfnExists ? @"yes" : @"NO",
+                        stateExists ? @"yes" : @"NO",
+                        assetsStatus]];
+
     engine->set_drumless(false);
 
     NSLog(@"MagentaRT_AU: Attempting to load model from path: %@", mlxfnPath);
     BOOL success = engine->load_model(mlxfnPath.UTF8String);
 
     if (success) {
+        [self writeDiskLog:[NSString stringWithFormat:@"load_model OK: %@", mlxfnPath.lastPathComponent]];
         NSLog(@"MagentaRT_AU: Successfully loaded model.");
         self->_modelDirectoryURL = [NSURL fileURLWithPath:[mlxfnPath stringByDeletingLastPathComponent]];
 
@@ -1811,6 +1843,10 @@ static BOOL paramIsBool(AUParameterAddress address) {
             [self sendStateUpdate:stateUpdate];
         });
     } else {
+        NSString* errMsg = [NSString stringWithFormat:@"load_model FAILED: %@ (mlxfn=%@ state=%@)",
+                            mlxfnPath, mlxfnExists ? @"ok" : @"missing", stateExists ? @"ok" : @"missing"];
+        [self writeDiskLog:errMsg];
+        [self addDebugLog:errMsg];
         NSLog(@"MagentaRT_AU: engine->load_model returned false.");
         dispatch_async(dispatch_get_main_queue(), ^{
             [self sendStateUpdate:@{ @"modelName": [NSString stringWithFormat:@"Failed: %@", mlxfnPath.lastPathComponent] }];
@@ -2196,6 +2232,7 @@ static BOOL paramIsBool(AUParameterAddress address) {
         }
 
         if (!mlxfnPath) {
+            [self writeDiskLog:[NSString stringWithFormat:@"selectModel: no .mlxfn for '%@' in %@", modelName, modelsDir.path]];
             [self sendStateUpdate:@{@"modelName": @"No .mlxfn found"}];
             if (accessGranted) [modelsDir stopAccessingSecurityScopedResource];
             return;

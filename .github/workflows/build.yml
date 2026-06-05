@@ -37,7 +37,7 @@ jobs:
         shell: bash
         run: |
           source .venv/bin/activate
-          cmake . -B build -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          cmake . -B build -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DMAGENTART_DEBUG_LOG=ON
 
       - name: Build AUv3 targets
         shell: bash
