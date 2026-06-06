@@ -2,6 +2,9 @@
 
 Fork of the [Magenta RealTime 2](https://github.com/magenta/magenta-realtime) AUv3 plugin, extracted to this repo root with upstream kept as a git submodule.
 
+<img width="900"  alt="Screenshot" src="https://github.com/user-attachments/assets/02ec66c3-545c-4c82-9a84-fb90d8806b51" />
+
+
 ## Layout
 
 ```
