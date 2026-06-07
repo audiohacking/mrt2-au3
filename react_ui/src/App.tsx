@@ -72,9 +72,11 @@ const paramKeyForAddress: Record<number, string> = {
   46: 'onsetmode',
   47: 'seedrotation',
   48: 'cfgdrums',
+  49: 'fxmode',
+  50: 'fxrefwindow',
 };
 
-const boolParams = new Set([6, 9, 31, 32, 39, 45, 46]);
+const boolParams = new Set([6, 9, 31, 32, 39, 45, 46, 49]);
 
 // ─── Computer keyboard → MIDI (Ableton Live layout) ──────────────────────────
 // Base row (lower octave): A S D F G H J = C D E F G A B, with W E T Y U as
@@ -105,6 +107,8 @@ const DEFAULT_PARAMS = {
   drumless: false,
   midigate: false,
   onsetmode: false,
+  fxmode: false,
+  fxrefwindow: 1,
 };
 
 // Default surface positions (normalised 0–1) — purely frontend state
@@ -128,6 +132,7 @@ export default function App() {
 
   // ── State ──
   const [params, setParams] = useState({ ...DEFAULT_PARAMS });
+  const isFxMode = isAUv3 && !!params.fxmode;
 
   const [metrics, setMetrics] = useState({
     frameMs: 0,
@@ -135,6 +140,8 @@ export default function App() {
     bufferCap: 0,
     leftLevel: 0,
     rightLevel: 0,
+    refLeftLevel: 0,
+    refRightLevel: 0,
     droppedFrames: 0,
     transportFlags: -1,
   });
@@ -428,6 +435,13 @@ export default function App() {
       }
       if (state.audioLevels) {
         setMetrics(m => ({ ...m, leftLevel: state.audioLevels.left, rightLevel: state.audioLevels.right }));
+      }
+      if (state.referenceLevels) {
+        setMetrics(m => ({
+          ...m,
+          refLeftLevel: state.referenceLevels.left,
+          refRightLevel: state.referenceLevels.right,
+        }));
       }
       if (state.modelName !== undefined) setModelName(state.modelName);
       if (state.isPlaying !== undefined) setIsPlaying(state.isPlaying);
@@ -1005,6 +1019,14 @@ export default function App() {
                   tooltip="Reports the plugin's internal buffering latency to your DAW. When enabled, your host DAW will automatically shift all other project tracks to keep the AI's generation in perfect sync with the grid."
                 />
               )}
+              {isAUv3 && (
+                <MagentaToggle
+                  label="FX Mode"
+                  checked={params.fxmode}
+                  onChange={(v) => sendParamChange(49, v ? 1 : 0)}
+                  tooltip="Use a sidechain reference from another track instead of MIDI. Route reference audio via Logic's Side Chain menu on this track."
+                />
+              )}
             </div>
           </div>
 
@@ -1016,7 +1038,58 @@ export default function App() {
             minHeight: 0,
           }}>
 
+            {/* ── FX reference panel (replaces Note Controls in FX mode) ── */}
+            {isFxMode && (
+            <div className="section-box" style={{
+              width: '280px',
+              flexShrink: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              padding: '24px 16px',
+              gap: '14px',
+              position: 'relative',
+            }}>
+              <div style={{
+                position: 'absolute',
+                top: '-8px',
+                left: '14px',
+                background: 'var(--color-bg)',
+                padding: '0 6px',
+              }}>
+                <span className="section-header" style={{ margin: 0, fontSize: '11px' }}>Sidechain Reference</span>
+              </div>
+              <p style={{ margin: 0, fontSize: '11px', lineHeight: 1.45, opacity: 0.75 }}>
+                Keep reference audio on a separate track. In Logic, open the plugin header Side Chain menu and choose that track. Output here is generated only — reference is not passed through.
+              </p>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <span style={{ fontSize: '11px', opacity: 0.7, minWidth: '72px' }}>Reference</span>
+                <AudioMeter leftLevel={metrics.refLeftLevel} rightLevel={metrics.refRightLevel} />
+              </div>
+              <MagentaSlider
+                label="Window"
+                tooltip="Length of sidechain audio used to update the live style reference."
+                value={params.fxrefwindow}
+                min={0}
+                max={2}
+                step={1}
+                onChange={(v) => sendParamChange(50, v)}
+                stacked
+              />
+              <MagentaSlider
+                label="Follow Strength"
+                tooltip="How strongly generation follows the sidechain reference (Prompt Adherence)."
+                value={params.cfgmusiccoca}
+                min={0}
+                max={5}
+                step={0.1}
+                onChange={(v) => sendParamChange(3, v)}
+                stacked
+              />
+            </div>
+            )}
+
             {/* ── B: Note Controls ── */}
+            {!isFxMode && (
             <div className="section-box" style={{
               width: '200px',
               flexShrink: 0,
@@ -1078,6 +1151,7 @@ export default function App() {
                 tooltip="Allows the model to continuously retrigger (e.g. strum, bow, or arpeggiate) when notes are held."
               />
             </div>
+            )}
 
             {/* ── B: Memory Banks ── */}
             <div className="section-box" style={{
@@ -1269,7 +1343,7 @@ export default function App() {
           />
         </div>
 
-        {/* Center: MIDI (top) + Keyboard (bottom) */}
+        {/* Center: MIDI (top) + Keyboard (bottom), or FX sidechain hint */}
         <div style={{
           width: '682px',
           flexShrink: 0,
@@ -1277,6 +1351,22 @@ export default function App() {
           flexDirection: 'column',
           justifyContent: 'flex-start',
         }}>
+          {isFxMode ? (
+            <div style={{
+              flex: 1,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '12px 24px',
+              opacity: 0.65,
+              fontSize: '12px',
+              textAlign: 'center',
+              lineHeight: 1.5,
+            }}>
+              FX mode: MIDI keyboard disabled. Reference drives prompt slot 1 via sidechain input.
+            </div>
+          ) : (
+          <>
           {/* Top row: MIDI selector (left) + octave rocker (center) */}
           <div style={{
             flexShrink: 0,
@@ -1352,6 +1442,8 @@ export default function App() {
               keyboardBaseNote={KEYBOARD_MIDI_BASE_DEFAULT + octaveOffset * 12}
             />
           </div>
+          </>
+          )}
         </div>
 
         {/* Right: Full-height container for Timing Indicator + Audio Meter */}

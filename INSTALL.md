@@ -44,7 +44,21 @@ The inference engine runs in real-time and expects specific audio configuration 
 
 ---
 
-## 3. Reporting Issues
+## 3. FX Mode (Sidechain Reference) — Logic Pro
+
+FX mode lets you drive generation from **audio on another track** (parallel routing), without inserting the plugin on the reference track. The reference is **not** passed through to the output — only AI-generated audio appears on the MRT2 track.
+
+1. **Track A:** Your reference material (drums, loop, etc.). No MRT2 on this track.
+2. **Track B:** Software Instrument track with **MRT2**. Enable **FX Mode** in the plugin UI.
+3. On Track B, open the plugin header **Side Chain** menu and select **Track A** (or a bus feeding the reference).
+4. Keep **Delay Comp** enabled so Logic aligns the MRT2 track with the rest of the mix.
+5. Mix Track A (dry reference) and Track B (generated output) in parallel.
+
+The live sidechain reference updates **Prompt 1** (first prompt slot) via MusicCoCa encoding every ~2 seconds.
+
+---
+
+## 4. Reporting Issues
 
 If you encounter bugs, performance issues, or crash logs, please report them at:
 👉 https://github.com/magenta/magenta-realtime/issues

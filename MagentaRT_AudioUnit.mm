@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Magenta RT AUv3 Audio Unit — decoder transformer generator (no audio input).
-// Uses sequence-layers exported .mlxfn for autoregressive generation.
+// Magenta RT AUv3 Audio Unit — decoder transformer generator.
+// Instrument mode: MIDI conditioning, no audio input.
+// FX mode: sidechain reference input (parallel routing), generated output only.
 
 #import "MagentaRT_AudioUnit.h"
 #import <AVFoundation/AVFoundation.h>
@@ -22,6 +23,7 @@
 #import "MagentaModelDownloader.h"
 #include "magenta_paths.h"
 #include "audio_level_processor.h"
+#include "SidechainReferenceCapture.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
@@ -31,6 +33,56 @@ using magentart::core::EngineMetrics;
 // ─── Dev server probe ────────────────────────────────────────────────────────
 
 static const int kDevServerPort = 62420;
+
+// AU parameter addresses
+static const AUParameterAddress kParamAddressFxMode = 49;
+static const AUParameterAddress kParamAddressFxRefWindow = 50;
+
+// Prompt slot used for live sidechain reference in FX mode.
+static const int kFxReferencePromptIndex = 0;
+
+// MusicCoCa expects 10 s of mono audio at 16 kHz.
+static const int kMusicCoCaMonoFrames = 160000;
+
+// Sidechain pull buffer for render callback (Apple BufferedInputBus pattern).
+struct SidechainPullBuffer {
+    float* L = nullptr;
+    float* R = nullptr;
+    UInt32 capacity = 0;
+
+    void allocate(UInt32 maxFrames) {
+        deallocate();
+        capacity = maxFrames;
+        L = (float*)calloc(maxFrames, sizeof(float));
+        R = (float*)calloc(maxFrames, sizeof(float));
+    }
+
+    void deallocate() {
+        if (L) { free(L); L = nullptr; }
+        if (R) { free(R); R = nullptr; }
+        capacity = 0;
+    }
+
+    AUAudioUnitStatus pull(AUAudioFrameCount frameCount, NSInteger busNumber,
+                           const AudioTimeStamp* timestamp,
+                           AURenderPullInputBlock pullInputBlock) const {
+        if (!pullInputBlock || !L || !R || frameCount > capacity) {
+            return kAUAudioUnitErr_Uninitialized;
+        }
+
+        AudioBufferList bufferList;
+        bufferList.mNumberBuffers = 2;
+        bufferList.mBuffers[0].mNumberChannels = 1;
+        bufferList.mBuffers[0].mDataByteSize = frameCount * sizeof(float);
+        bufferList.mBuffers[0].mData = L;
+        bufferList.mBuffers[1].mNumberChannels = 1;
+        bufferList.mBuffers[1].mDataByteSize = frameCount * sizeof(float);
+        bufferList.mBuffers[1].mData = R;
+
+        AudioUnitRenderActionFlags pullFlags = 0;
+        return pullInputBlock(&pullFlags, timestamp, frameCount, busNumber, &bufferList);
+    }
+};
 
 static BOOL isDevServerRunning(void) {
     int sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -58,6 +110,9 @@ static BOOL isDevServerRunning(void) {
     AUParameterTree* _parameterTree;
     AUAudioUnitBus* _outputBus;
     AUAudioUnitBusArray* _outputBusArray;
+    AUAudioUnitBus* _dummyInputBus;
+    AUAudioUnitBus* _sidechainBus;
+    AUAudioUnitBusArray* _inputBusArray;
     BOOL _modelLoaded;
     AudioConverterRef _resampler;
     float* _resampleBufferL;
@@ -76,6 +131,12 @@ static BOOL isDevServerRunning(void) {
     NSMutableArray* _pendingLogs;
     std::atomic<bool> _midiNotes[128];
     magentart::common::AudioLevelProcessor _levelProcessor;
+    magentart::common::AudioLevelProcessor _referenceLevelProcessor;
+    mrt2_au::SidechainReferenceRingBuffer _referenceRing;
+    SidechainPullBuffer _sidechainPull;
+    std::atomic<bool> _fxMode{false};
+    std::atomic<bool> _referenceEncodeInFlight{false};
+    std::atomic<int> _referenceEncodeTicks{0};
 }
 
 // Fallback init — the extension system may call plain init before the factory method.
@@ -211,9 +272,23 @@ static BOOL isDevServerRunning(void) {
 
     AUParameter* cfgDrumsParam = makeParam(@"cfgdrums", @"Drums Adherence", 48, -1.0, 7.0, 1.0);
 
+    AUParameter* fxModeParam = [AUParameterTree
+        createParameterWithIdentifier:@"fxmode" name:@"FX Mode" address:kParamAddressFxMode min:0.0 max:1.0
+        unit:kAudioUnitParameterUnit_Indexed unitName:nil
+        flags:kAudioUnitParameterFlag_IsWritable | kAudioUnitParameterFlag_IsReadable
+        valueStrings:@[@"Instrument", @"FX (Sidechain)"] dependentParameters:nil];
+    fxModeParam.value = 0.0;
+
+    AUParameter* fxRefWindowParam = [AUParameterTree
+        createParameterWithIdentifier:@"fxrefwindow" name:@"Reference Window" address:kParamAddressFxRefWindow min:0.0 max:2.0
+        unit:kAudioUnitParameterUnit_Indexed unitName:nil
+        flags:kAudioUnitParameterFlag_IsWritable | kAudioUnitParameterFlag_IsReadable
+        valueStrings:@[@"3 s", @"5 s", @"10 s"] dependentParameters:nil];
+    fxRefWindowParam.value = 1.0; // 5 s default
+
     NSMutableArray* allParams = [NSMutableArray arrayWithArray:@[
         tempParam, topkParam, cfgMusicCoCaParam, cfgNotesParam, volParam, muteParam, unmaskWidthParam, bufSizeParam, latencyCompParam,
-        cfgDrumsParam
+        cfgDrumsParam, fxModeParam, fxRefWindowParam
     ]];
     [allParams addObjectsFromArray:weightParams];
     [allParams addObjectsFromArray:@[resetParam, bypassParam, seedRotationParam]];
@@ -260,6 +335,19 @@ static BOOL isDevServerRunning(void) {
         else if (param.address == 46) weakSelf->_engine.set_onset_mode(value > 0.5f);
         else if (param.address == 48) weakSelf->_engine.set_cfg_drums(value);
         else if (param.address == 47) weakSelf->_engine.set_seed_rotation((int)value);
+        else if (param.address == kParamAddressFxMode) {
+            const bool fx = value > 0.5f;
+            weakSelf->_fxMode.store(fx, std::memory_order_relaxed);
+            weakSelf->_sidechainBus.enabled = fx;
+            if (fx) {
+                weakSelf->_referenceRing.clear();
+                weakSelf->_referenceEncodeTicks.store(0, std::memory_order_relaxed);
+                for (int n = 0; n < 128; ++n) {
+                    weakSelf->_engine.set_note_off(static_cast<uint8_t>(n));
+                    weakSelf->_midiNotes[n].store(false, std::memory_order_relaxed);
+                }
+            }
+        }
     };
     _parameterTree.implementorValueProvider = ^AUValue(AUParameter* param) {
         if (param.address == 0) return weakSelf->_engine.get_temperature();
@@ -284,6 +372,11 @@ static BOOL isDevServerRunning(void) {
         else if (param.address == 46) return weakSelf->_engine.get_onset_mode() ? 1.0f : 0.0f;
         else if (param.address == 48) return weakSelf->_engine.get_cfg_drums();
         else if (param.address == 47) return (AUValue)weakSelf->_engine.get_seed_rotation();
+        else if (param.address == kParamAddressFxMode) return weakSelf->_fxMode.load(std::memory_order_relaxed) ? 1.0f : 0.0f;
+        else if (param.address == kParamAddressFxRefWindow) {
+            AUParameter* p = [weakSelf->_parameterTree parameterWithAddress:kParamAddressFxRefWindow];
+            return p ? p.value : 1.0f;
+        }
         return 0.0;
     };
 
@@ -299,6 +392,27 @@ static BOOL isDevServerRunning(void) {
     _outputBusArray = [[AUAudioUnitBusArray alloc] initWithAudioUnit:self
                                                               busType:AUAudioUnitBusTypeOutput
                                                                busses:@[_outputBus]];
+
+    // Sidechain input buses: dummy bus 0 (disabled) + sidechain bus 1 for Logic Pro routing.
+    _dummyInputBus = [[AUAudioUnitBus alloc] initWithFormat:format error:&busError];
+    if (busError) {
+        if (outError) *outError = busError;
+        return nil;
+    }
+    _dummyInputBus.name = @"Input";
+    _dummyInputBus.enabled = NO;
+
+    _sidechainBus = [[AUAudioUnitBus alloc] initWithFormat:format error:&busError];
+    if (busError) {
+        if (outError) *outError = busError;
+        return nil;
+    }
+    _sidechainBus.name = @"Sidechain";
+    _sidechainBus.enabled = NO;
+
+    _inputBusArray = [[AUAudioUnitBusArray alloc] initWithAudioUnit:self
+                                                            busType:AUAudioUnitBusTypeInput
+                                                             busses:@[_dummyInputBus, _sidechainBus]];
 
     // Load tokenizer and models externally from custom path or ~/Documents/Magenta/resources/ to keep bundle size tiny
     NSString *customResources = [[NSUserDefaults standardUserDefaults] stringForKey:@"MagentaRT_CustomResourcesPath"];
@@ -369,6 +483,60 @@ static BOOL isDevServerRunning(void) {
     _levelProcessor.read_and_reset_peaks(*outLeft, *outRight);
 }
 
+- (void)readReferenceLevels:(float*)outLeft right:(float*)outRight {
+    _referenceLevelProcessor.read_and_reset_peaks(*outLeft, *outRight);
+}
+
+- (BOOL)isFxMode {
+    return _fxMode.load(std::memory_order_relaxed);
+}
+
+static size_t FxReferenceWindowSamples(AUValue windowIndex) {
+    if (windowIndex < 0.5f) return 48000 * 3;
+    if (windowIndex < 1.5f) return 48000 * 5;
+    return 48000 * 10;
+}
+
+- (void)encodeSidechainReferenceIfNeeded {
+    if (!_fxMode.load(std::memory_order_relaxed)) return;
+    if (!_engine.is_loaded()) return;
+    if (_referenceEncodeInFlight.load(std::memory_order_relaxed)) return;
+
+    const size_t filled = _referenceRing.filled_samples();
+    AUParameter* windowParam = [_parameterTree parameterWithAddress:kParamAddressFxRefWindow];
+    const size_t windowSamples = FxReferenceWindowSamples(windowParam ? windowParam.value : 1.0f);
+    if (filled < windowSamples / 4) return; // wait for at least 25% of window
+
+    _referenceEncodeInFlight.store(true, std::memory_order_relaxed);
+    RealtimeRunner* engine = &_engine;
+    const size_t captureSamples = std::min(filled, windowSamples);
+
+    std::vector<float> stereoL(captureSamples);
+    std::vector<float> stereoR(captureSamples);
+    const size_t copied = _referenceRing.read_recent(stereoL.data(), stereoR.data(), captureSamples);
+    if (copied == 0) {
+        _referenceEncodeInFlight.store(false, std::memory_order_relaxed);
+        return;
+    }
+
+    __weak MagentaRTAudioUnit* weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        std::vector<float> mono16k((copied / 3) + 1);
+        const size_t monoFrames = mrt2_au::downmix_resample_to_16k_mono(
+            stereoL.data(), stereoR.data(), copied, mono16k.data(), mono16k.size());
+
+        std::vector<float> padded(kMusicCoCaMonoFrames, 0.0f);
+        mrt2_au::pad_mono_to_length(mono16k.data(), monoFrames, padded.data(), kMusicCoCaMonoFrames);
+
+        engine->set_audio_prompt_samples(kFxReferencePromptIndex, "Sidechain Reference",
+                                         padded.data(), kMusicCoCaMonoFrames);
+        MagentaRTAudioUnit* strongSelf = weakSelf;
+        if (strongSelf) {
+            strongSelf->_referenceEncodeInFlight.store(false, std::memory_order_relaxed);
+        }
+    });
+}
+
 
 - (NSTimeInterval)latency {
     return _engine.get_latency_samples() / 48000.0;
@@ -400,6 +568,14 @@ static BOOL isDevServerRunning(void) {
 
 - (AUAudioUnitBusArray*)outputBusses {
     return _outputBusArray;
+}
+
+- (AUAudioUnitBusArray*)inputBusses {
+    return _inputBusArray;
+}
+
+- (BOOL)canProcessInPlace {
+    return NO;
 }
 
 // --- Parameter Tree -----------------------------------------------------------
@@ -617,12 +793,14 @@ static BOOL isDevServerRunning(void) {
         _resampleBufferInterleaved = (float*)calloc(16384, sizeof(float));
     }
 
+    _sidechainPull.allocate(self.maximumFramesToRender);
     _engine.start();
     return YES;
 }
 
 - (void)deallocateRenderResources {
     _engine.stop();
+    _sidechainPull.deallocate();
     if (_resampler) {
         AudioConverterDispose(_resampler);
         _resampler = NULL;
@@ -750,7 +928,23 @@ static OSStatus ConverterDataProc(AudioConverterRef inAudioConverter,
                 else if (paramEvent.parameterAddress == 45) engine->set_midi_gate_enabled(paramEvent.value > 0.5f);
                 else if (paramEvent.parameterAddress == 46) engine->set_onset_mode(paramEvent.value > 0.5f);
                 else if (paramEvent.parameterAddress == 48) engine->set_cfg_drums(paramEvent.value);
+                else if (paramEvent.parameterAddress == kParamAddressFxMode) {
+                    const bool fx = paramEvent.value > 0.5f;
+                    unsafeSelf->_fxMode.store(fx, std::memory_order_relaxed);
+                    unsafeSelf->_sidechainBus.enabled = fx;
+                    if (fx) {
+                        unsafeSelf->_referenceRing.clear();
+                        unsafeSelf->_referenceEncodeTicks.store(0, std::memory_order_relaxed);
+                        for (int n = 0; n < 128; ++n) {
+                            engine->set_note_off(static_cast<uint8_t>(n));
+                            unsafeSelf->_midiNotes[n].store(false, std::memory_order_relaxed);
+                        }
+                    }
+                }
             } else if (event->head.eventType == AURenderEventMIDI) {
+                if (unsafeSelf->_fxMode.load(std::memory_order_relaxed)) {
+                    continue; // FX mode: ignore MIDI from host
+                }
                 const AUMIDIEvent& midiEvent = event->MIDI;
                 uint8_t status = midiEvent.data[0] & 0xF0;
                 uint8_t note = midiEvent.data[1];
@@ -800,6 +994,19 @@ static OSStatus ConverterDataProc(AudioConverterRef inAudioConverter,
             isPlaying = NO;
         }
         wasDawPlaying = isDawPlaying;
+
+        // FX mode: pull sidechain reference (parallel routing — never mixed to output).
+        if (unsafeSelf->_fxMode.load(std::memory_order_relaxed) && pullInputBlock) {
+            AUAudioUnitStatus pullStatus = unsafeSelf->_sidechainPull.pull(
+                frameCount, 1, timestamp, pullInputBlock);
+            if (pullStatus == noErr) {
+                unsafeSelf->_referenceRing.write(
+                    unsafeSelf->_sidechainPull.L, unsafeSelf->_sidechainPull.R, frameCount);
+                unsafeSelf->_referenceLevelProcessor.process_block(
+                    unsafeSelf->_sidechainPull.L, unsafeSelf->_sidechainPull.R, frameCount);
+                unsafeSelf->_referenceEncodeTicks.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
 
         // Edge detection from stopped to playing
         if (isPlaying && !wasPlaying) {
@@ -919,6 +1126,7 @@ static OSStatus ConverterDataProc(AudioConverterRef inAudioConverter,
     NSURL* _activeModelURL;
     NSMutableDictionary* _lastParams;
     int _metricsTicks;
+    int _fxEncodeCounter;
     BOOL _weightChangeFromUI;  // set by textPrompts handler, cleared by polling loop
 
     NSURL* _modelDirectoryURL;
@@ -1121,6 +1329,23 @@ static NSString* bankFilePathAU(int index) {
     };
     stateUpdate[@"activeNotes"] = [au activeNotes];
 
+    if ([au isFxMode]) {
+        float refL = 0.0f;
+        float refR = 0.0f;
+        [au readReferenceLevels:&refL right:&refR];
+        stateUpdate[@"referenceLevels"] = @{
+            @"left": @(refL),
+            @"right": @(refR)
+        };
+        _fxEncodeCounter++;
+        if (_fxEncodeCounter >= 50) {
+            _fxEncodeCounter = 0;
+            [au encodeSidechainReferenceIfNeeded];
+        }
+    } else {
+        _fxEncodeCounter = 0;
+    }
+
     if (_metricsTicks >= 5) {
         _metricsTicks = 0;
         EngineMetrics m = engine->get_metrics();
@@ -1184,7 +1409,7 @@ static NSString* bankFilePathAU(int index) {
 
     NSMutableDictionary* params = [NSMutableDictionary dictionary];
     NSMutableDictionary* weightChanges = [NSMutableDictionary dictionary];
-    for (int i = 0; i <= 46; i++) {
+    for (int i = 0; i <= 50; i++) {
         NSString* key = paramKeyForAddress(i);
         if (!key) continue;
         AUParameter* param = [au.parameterTree parameterWithAddress:i];
@@ -1246,6 +1471,10 @@ static NSString* paramKeyForAddress(AUParameterAddress address) {
         case 44: return @"drums_mute_other";
         case 45: return @"midigate";
         case 46: return @"onsetmode";
+        case 47: return @"seedrotation";
+        case 48: return @"cfgdrums";
+        case 49: return @"fxmode";
+        case 50: return @"fxrefwindow";
         default:
             return nil;
     }
@@ -1253,6 +1482,7 @@ static NSString* paramKeyForAddress(AUParameterAddress address) {
 
 static BOOL paramIsBool(AUParameterAddress address) {
     if (address == 6 || address == 9 || address == 31 || address == 32 || address == 39 || (address >= 40 && address <= 46)) return YES;
+    if (address == 49) return YES; // indexed 0/1 treated as bool in UI sync
     return NO;
 }
 
@@ -1261,7 +1491,7 @@ static BOOL paramIsBool(AUParameterAddress address) {
     if (!au) return;
 
     NSMutableDictionary* initialParams = [NSMutableDictionary dictionary];
-    for (int i = 0; i <= 46; i++) {
+    for (int i = 0; i <= 50; i++) {
         // Skip weight params — prompts carry their own weights via textPrompts.
         if (i >= 10 && i <= 15) continue;
         AUParameter* param = [au.parameterTree parameterWithAddress:i];
@@ -1693,6 +1923,7 @@ static BOOL paramIsBool(AUParameterAddress address) {
             NSNumber* onVal = body[@"on"];
             if (!noteVal || !onVal || !_audioUnit) return;
             MagentaRTAudioUnit* au = (MagentaRTAudioUnit*)_audioUnit;
+            if ([au isFxMode]) return;
             RealtimeRunner* engine = [au engine];
             if (!engine) return;
             uint8_t note = (uint8_t)MIN(127, MAX(0, noteVal.intValue));

@@ -34,6 +34,9 @@ using magentart::core::RealtimeRunner;
 - (void)setNoteOn:(uint8_t)note on:(BOOL)on;
 - (NSArray<NSNumber*>*)activeNotes;
 - (void)readAudioLevels:(float*)outLeft right:(float*)outRight;
+- (void)readReferenceLevels:(float*)outLeft right:(float*)outRight;
+- (BOOL)isFxMode;
+- (void)encodeSidechainReferenceIfNeeded;
 @end
 
 @interface MagentaRTViewController : AUViewController <AUAudioUnitFactory>
