@@ -67,7 +67,7 @@ struct SidechainPullBuffer {
                            const AudioTimeStamp* timestamp,
                            AURenderPullInputBlock pullInputBlock) const {
         if (!pullInputBlock || !L || !R || frameCount > capacity) {
-            return kAUAudioUnitErr_Uninitialized;
+            return kAudioUnitErr_Uninitialized;
         }
 
         AudioBufferList bufferList;
@@ -134,9 +134,9 @@ static BOOL isDevServerRunning(void) {
     magentart::common::AudioLevelProcessor _referenceLevelProcessor;
     mrt2_au::SidechainReferenceRingBuffer _referenceRing;
     SidechainPullBuffer _sidechainPull;
-    std::atomic<bool> _fxMode{false};
-    std::atomic<bool> _referenceEncodeInFlight{false};
-    std::atomic<int> _referenceEncodeTicks{0};
+    std::atomic<bool> _fxMode;
+    std::atomic<bool> _referenceEncodeInFlight;
+    std::atomic<int> _referenceEncodeTicks;
 }
 
 // Fallback init — the extension system may call plain init before the factory method.
@@ -161,6 +161,9 @@ static BOOL isDevServerRunning(void) {
     if (!self) return nil;
 
     _modelLoaded = NO;
+    _fxMode.store(false, std::memory_order_relaxed);
+    _referenceEncodeInFlight.store(false, std::memory_order_relaxed);
+    _referenceEncodeTicks.store(0, std::memory_order_relaxed);
 
     for (int i = 0; i < 128; i++) {
         _midiNotes[i].store(false, std::memory_order_relaxed);
