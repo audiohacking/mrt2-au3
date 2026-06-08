@@ -15,9 +15,11 @@
  */
 
 import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
-import { ModelSelector, MidiSelector, ResourceOnboardingModal, AudioMeter, Knob, MagentaToggle, ALL_COLORS, TransportControls, TimingIndicator, PromptSurface, calculateWeights, ALL_SUGGESTIONS, DEFAULT_TEMPERATURE, DEFAULT_TOPK, DEFAULT_CFG_MUSICCOCA, DEFAULT_CFG_NOTES, DEFAULT_CFG_DRUMS, DEFAULT_VOLUME, DEFAULT_UNMASK_WIDTH, DEFAULT_BUFFER_SIZE } from '@magenta-rt/common';
+import { ModelSelector, MidiSelector, ResourceOnboardingModal, AudioMeter, Knob, TransportControls, TimingIndicator, PromptSurface, calculateWeights, ALL_SUGGESTIONS, DEFAULT_TEMPERATURE, DEFAULT_TOPK, DEFAULT_CFG_MUSICCOCA, DEFAULT_CFG_NOTES, DEFAULT_CFG_DRUMS, DEFAULT_VOLUME, DEFAULT_UNMASK_WIDTH, DEFAULT_BUFFER_SIZE } from '@magenta-rt/common';
 import { MagentaSlider } from './components/MagentaSlider';
+import { ForkMagentaToggle } from './components/ForkMagentaToggle';
 import { PianoKeyboard } from './components/PianoKeyboard';
+import { FORK_ACCENT, FORK_PROMPT_COLORS } from './forkTheme';
 import type { PromptNode, ListenerNode, MidiSource } from '@magenta-rt/common';
 import IconButton from '@mui/material/IconButton';
 
@@ -39,8 +41,6 @@ declare global {
     };
   }
 }
-
-const isAUv3 = window.__HOST_MODE__ === 'auv3';
 
 const MAX_PROMPTS = 6;
 
@@ -135,6 +135,8 @@ export default function App() {
   }
 
   // ── State ──
+  // Read at render time — module-level check runs before main.tsx sets __HOST_MODE__ in browser dev.
+  const isAUv3 = window.__HOST_MODE__ === 'auv3' || import.meta.env.DEV;
   const [params, setParams] = useState({ ...DEFAULT_PARAMS });
   const isFxMode = isAUv3 && !!params.fxmode;
 
@@ -825,7 +827,7 @@ export default function App() {
                     <PromptRow
                       key={idx}
                       text={p.text}
-                      color={ALL_COLORS[idx % ALL_COLORS.length]}
+                      color={FORK_PROMPT_COLORS[idx % FORK_PROMPT_COLORS.length]}
                       weight={p.weight}
                       isEmpty={!p.text && !p.isAudio}
                       isAudio={p.isAudio}
@@ -980,11 +982,12 @@ export default function App() {
           {/* ── B: Global Controls ── */}
           <div className="section-box" style={{
             display: 'flex',
-            alignItems: 'center',
+            alignItems: 'flex-start',
             padding: '20px 16px',
             gap: '16px',
             flexShrink: 0,
             position: 'relative',
+            flexWrap: 'wrap',
           }}>
             {/* Reset button — top right */}
             <IconButton
@@ -1005,56 +1008,52 @@ export default function App() {
               tooltip="Scales the unpredictability of the generated music. Lower values keep the output focused and conservative, while higher values make it more adventurous"
               value={params.temperature} min={0} max={3} step={0.01} onChange={(v) => sendParamChange(0, v)}
               size={70}
+              accentColor={FORK_ACCENT}
             />
             <Knob
               label="Top-K Sampling"
               tooltip="Restricts the model to choosing from the 'K' most likely next audio tokens. Lower numbers keep the music safe and predictable; higher numbers allow for more unexpected, diverse choices."
               value={params.topk} min={1} max={1024} step={1} onChange={(v) => sendParamChange(1, v)}
               size={70}
+              accentColor={FORK_ACCENT}
             />
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', marginLeft: '8px' }}>
-              <MagentaToggle
-                label="No Drums"
-                checked={params.drumless}
-                onChange={(v) => sendParamChange(39, v ? 1 : 0)}
-                tooltip="Encourages the model to not play drums."
-              />
-              {isAUv3 && (
-                <MagentaToggle
-                  label="Delay Comp"
-                  checked={params.latencycomp}
-                  onChange={(v) => sendParamChange(9, v ? 1 : 0)}
-                  tooltip="Reports the plugin's internal buffering latency to your DAW. When enabled, your host DAW will automatically shift all other project tracks to keep the AI's generation in perfect sync with the grid."
+            <div style={{ display: 'flex', flexDirection: 'row', gap: '20px', marginLeft: '8px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                <ForkMagentaToggle
+                  label="No Drums"
+                  checked={params.drumless}
+                  onChange={(v) => sendParamChange(39, v ? 1 : 0)}
+                  tooltip="Encourages the model to not play drums."
                 />
-              )}
+                {isAUv3 && (
+                  <ForkMagentaToggle
+                    label="Delay Comp"
+                    checked={params.latencycomp}
+                    onChange={(v) => sendParamChange(9, v ? 1 : 0)}
+                    tooltip="Reports the plugin's internal buffering latency to your DAW. When enabled, your host DAW will automatically shift all other project tracks to keep the AI's generation in perfect sync with the grid."
+                  />
+                )}
+              </div>
               {isAUv3 && (
-                <MagentaToggle
-                  label="FX Mode"
-                  checked={params.fxmode}
-                  onChange={(v) => sendParamChange(49, v ? 1 : 0)}
-                  tooltip="Use a sidechain reference from another track instead of MIDI. Route reference audio via Logic's Side Chain menu on this track."
-                />
-              )}
-              {isAUv3 && (
-                <MagentaToggle
-                  label="Follow Tempo"
-                  checked={params.synctempo}
-                  onChange={(v) => sendParamChange(51, v ? 1 : 0)}
-                  tooltip="Injects the DAW project tempo into a hidden style prompt (e.g. 120 BPM) to steer generation. Requires the host to provide tempo via the plugin's musical context."
-                />
-              )}
-              {isAUv3 && (
-                <MagentaToggle
-                  label="Align Downbeat"
-                  checked={params.bpmalign}
-                  onChange={(v) => sendParamChange(52, v ? 1 : 0)}
-                  tooltip="When playback starts, delays buffer reset until the next host downbeat so generation begins on the grid."
-                />
-              )}
-              {isAUv3 && metrics.hostBpm > 0 && (
-                <span style={{ fontSize: '11px', opacity: 0.55, marginLeft: '4px' }}>
-                  Host: {Math.round(metrics.hostBpm)} BPM
-                </span>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                  <ForkMagentaToggle
+                    label="Follow Tempo"
+                    checked={params.synctempo}
+                    onChange={(v) => sendParamChange(51, v ? 1 : 0)}
+                    tooltip="Injects the DAW project tempo into a hidden style prompt (e.g. 120 BPM) to steer generation. Requires the host to provide tempo via the plugin's musical context."
+                  />
+                  <ForkMagentaToggle
+                    label="Align Downbeat"
+                    checked={params.bpmalign}
+                    onChange={(v) => sendParamChange(52, v ? 1 : 0)}
+                    tooltip="When playback starts, delays buffer reset until the next host downbeat so generation begins on the grid."
+                  />
+                  {metrics.hostBpm > 0 && (
+                    <span style={{ fontSize: '11px', opacity: 0.55, marginLeft: '4px' }}>
+                      Host: {Math.round(metrics.hostBpm)} BPM
+                    </span>
+                  )}
+                </div>
               )}
             </div>
           </div>
@@ -1067,69 +1066,18 @@ export default function App() {
             minHeight: 0,
           }}>
 
-            {/* ── FX reference panel (replaces Note Controls in FX mode) ── */}
-            {isFxMode && (
+            {/* ── B: Note Controls (FX mode toggles sidechain reference in same panel) ── */}
             <div className="section-box" style={{
-              width: '280px',
-              flexShrink: 0,
-              display: 'flex',
-              flexDirection: 'column',
-              padding: '24px 16px',
-              gap: '14px',
-              position: 'relative',
-            }}>
-              <div style={{
-                position: 'absolute',
-                top: '-8px',
-                left: '14px',
-                background: 'var(--color-bg)',
-                padding: '0 6px',
-              }}>
-                <span className="section-header" style={{ margin: 0, fontSize: '11px' }}>Sidechain Reference</span>
-              </div>
-              <p style={{ margin: 0, fontSize: '11px', lineHeight: 1.45, opacity: 0.75 }}>
-                Keep reference audio on a separate track. In Logic, open the plugin header Side Chain menu and choose that track. Output here is generated only — reference is not passed through.
-              </p>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                <span style={{ fontSize: '11px', opacity: 0.7, minWidth: '72px' }}>Reference</span>
-                <AudioMeter leftLevel={metrics.refLeftLevel} rightLevel={metrics.refRightLevel} />
-              </div>
-              <MagentaSlider
-                label="Window"
-                tooltip="Length of sidechain audio used to update the live style reference."
-                value={params.fxrefwindow}
-                min={0}
-                max={2}
-                step={1}
-                onChange={(v) => sendParamChange(50, v)}
-                stacked
-              />
-              <MagentaSlider
-                label="Follow Strength"
-                tooltip="How strongly generation follows the sidechain reference (Prompt Adherence)."
-                value={params.cfgmusiccoca}
-                min={0}
-                max={5}
-                step={0.1}
-                onChange={(v) => sendParamChange(3, v)}
-                stacked
-              />
-            </div>
-            )}
-
-            {/* ── B: Note Controls ── */}
-            {!isFxMode && (
-            <div className="section-box" style={{
-              width: '200px',
+              width: isFxMode ? '280px' : '200px',
               flexShrink: 0,
               display: 'flex',
               flexDirection: 'column',
               alignItems: 'stretch',
               padding: '24px 16px',
-              justifyContent: 'space-between',
+              gap: '14px',
+              justifyContent: isFxMode ? 'flex-start' : 'space-between',
               position: 'relative',
             }}>
-              {/* Header — fieldset-legend style, out of flow */}
               <div style={{
                 position: 'absolute',
                 top: '-8px',
@@ -1139,48 +1087,92 @@ export default function App() {
                 background: 'var(--color-bg)',
                 padding: '0 6px',
               }}>
-              <span className="section-header" style={{ margin: 0, fontSize: '11px' }}>Note Controls</span>
+                <span className="section-header" style={{ margin: 0, fontSize: '11px' }}>Note Controls</span>
               </div>
-              {/* Reset button — top right */}
-              <IconButton
-                onClick={() => resetToDefaults([4, 7, 45, 46])}
-                variant="ghost"
-                style={{
-                  position: 'absolute',
-                  top: '3px',
-                  right: '3px',
-                  padding: '4px',
-                  opacity: 0.35,
-                }}
-              >
-                <span className="material-symbols-outlined" style={{ fontSize: '16px', color: '#FFF' }}>refresh</span>
-              </IconButton>
-              <MagentaSlider
-                label="Note Strength"
-                tooltip="Controls how strongly the model adheres to your input notes. Higher values force strict compliance, while lower values allow the model more creative drift."
-                value={params.cfgnotes} min={0} max={5} step={0.1} onChange={(v) => sendParamChange(4, v)}
-                stacked
-              />
-              <MagentaToggle
-                label="Solo"
-                checked={params.unmaskwidth === 127}
-                onChange={(v) => sendParamChange(7, v ? 127 : 4)}
-                tooltip="Encourages the model to only play the input notes, and not add accompaniment."
-              />
-              <MagentaToggle
-                label="MIDI Gate"
-                checked={params.midigate}
-                onChange={(v) => sendParamChange(45, v ? 1 : 0)}
-                tooltip="Gates the output so the model only makes sound when keys are pressed. When enabled, the plugin will mute when you release all notes."
-              />
-              <MagentaToggle
-                label="Auto-Strum"
-                checked={!params.onsetmode}
-                onChange={(v) => sendParamChange(46, v ? 0 : 1)}
-                tooltip="Allows the model to continuously retrigger (e.g. strum, bow, or arpeggiate) when notes are held."
-              />
+              {!isFxMode && (
+                <IconButton
+                  onClick={() => resetToDefaults([4, 7, 45, 46])}
+                  variant="ghost"
+                  style={{
+                    position: 'absolute',
+                    top: '3px',
+                    right: '3px',
+                    padding: '4px',
+                    opacity: 0.35,
+                  }}
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: '16px', color: '#FFF' }}>refresh</span>
+                </IconButton>
+              )}
+              {isFxMode ? (
+                <>
+                  <p style={{ margin: 0, fontSize: '11px', lineHeight: 1.45, opacity: 0.75 }}>
+                    Keep reference audio on a separate track. In Logic, open the plugin header Side Chain menu and choose that track. Output here is generated only — reference is not passed through.
+                  </p>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <span style={{ fontSize: '11px', opacity: 0.7, minWidth: '72px' }}>Reference</span>
+                    <AudioMeter leftLevel={metrics.refLeftLevel} rightLevel={metrics.refRightLevel} />
+                  </div>
+                  <MagentaSlider
+                    label="Window"
+                    tooltip="Length of sidechain audio used to update the live style reference."
+                    value={params.fxrefwindow}
+                    min={0}
+                    max={2}
+                    step={1}
+                    onChange={(v) => sendParamChange(50, v)}
+                    stacked
+                  />
+                  <MagentaSlider
+                    label="Follow Strength"
+                    tooltip="How strongly generation follows the sidechain reference (Prompt Adherence)."
+                    value={params.cfgmusiccoca}
+                    min={0}
+                    max={5}
+                    step={0.1}
+                    onChange={(v) => sendParamChange(3, v)}
+                    stacked
+                  />
+                </>
+              ) : (
+                <>
+                  <MagentaSlider
+                    label="Note Strength"
+                    tooltip="Controls how strongly the model adheres to your input notes. Higher values force strict compliance, while lower values allow the model more creative drift."
+                    value={params.cfgnotes} min={0} max={5} step={0.1} onChange={(v) => sendParamChange(4, v)}
+                    stacked
+                  />
+                  <ForkMagentaToggle
+                    label="Solo"
+                    checked={params.unmaskwidth === 127}
+                    onChange={(v) => sendParamChange(7, v ? 127 : 4)}
+                    tooltip="Encourages the model to only play the input notes, and not add accompaniment."
+                  />
+                  <ForkMagentaToggle
+                    label="MIDI Gate"
+                    checked={params.midigate}
+                    onChange={(v) => sendParamChange(45, v ? 1 : 0)}
+                    tooltip="Gates the output so the model only makes sound when keys are pressed. When enabled, the plugin will mute when you release all notes."
+                  />
+                  <ForkMagentaToggle
+                    label="Auto-Strum"
+                    checked={!params.onsetmode}
+                    onChange={(v) => sendParamChange(46, v ? 0 : 1)}
+                    tooltip="Allows the model to continuously retrigger (e.g. strum, bow, or arpeggiate) when notes are held."
+                  />
+                </>
+              )}
+              {isAUv3 && (
+                <div style={{ marginTop: 'auto' }}>
+                  <ForkMagentaToggle
+                    label="FX Mode"
+                    checked={params.fxmode}
+                    onChange={(v) => sendParamChange(49, v ? 1 : 0)}
+                    tooltip="Use a sidechain reference from another track instead of MIDI. Route reference audio via Logic's Side Chain menu on this track."
+                  />
+                </div>
+              )}
             </div>
-            )}
 
             {/* ── B: Memory Banks ── */}
             <div className="section-box" style={{
@@ -1458,7 +1450,7 @@ export default function App() {
           <div style={{ flex: 1, marginTop: '6px' }}>
             <PianoKeyboard
               activeNotes={activeNotes}
-              accentColor="#71fade"
+              accentColor={FORK_ACCENT}
               startNote={24}
               endNote={96}
               keyboardMidiEnabled={keyboardMidiEnabled}

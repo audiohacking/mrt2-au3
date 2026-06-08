@@ -40,7 +40,7 @@ export function MagentaSlider({
   max,
   step,
   onChange,
-  color = '#71fade',
+  color = 'var(--fork-accent)',
   labelFontSize = 12,
   stacked = false,
 }: MagentaSliderProps) {

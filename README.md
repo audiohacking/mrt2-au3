@@ -61,6 +61,27 @@ Build installers locally after `package_mrt2_au`:
 ./scripts/build-installer-pkg.sh --version 0.1.0 --sign-app
 ```
 
+## UI development (no backend compile)
+
+The React UI is a standalone Vite app. You can iterate on layout and colors in the browser without building the AU or MLX backend.
+
+```bash
+# From repo root (installs workspace deps on first run)
+npm install
+
+cd react_ui
+npm run dev
+```
+
+Open **http://localhost:62420** in a browser. Edits hot-reload instantly.
+
+To preview inside the plugin UI with the same HMR server:
+
+1. Leave `npm run dev` running in `react_ui/`
+2. Open the plugin in Logic (or `open ~/Applications/MRT2\ \(AU\).app`) — the AU detects port `62420` and loads the dev server instead of the bundled `index.html`
+
+Fork accent colors live in `react_ui/src/forkTheme.ts` and `react_ui/src/index.css` (`--fork-accent`). Production builds still use `npm run build` inside `react_ui/` (or the full CMake `deploy_mrt2_au` target, which runs the UI build for you).
+
 ## Build locally
 
 Requires full Xcode (Metal compiler). Command Line Tools alone are not enough.

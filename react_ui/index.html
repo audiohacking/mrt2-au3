@@ -26,6 +26,8 @@
 
 <body>
   <div id="root"></div>
+  <!-- Default AU mode for browser dev preview (native host overrides via injected script). -->
+  <script>window.__HOST_MODE__ = window.__HOST_MODE__ || 'auv3';</script>
   <script type="module" src="/src/main.tsx"></script>
 </body>
 

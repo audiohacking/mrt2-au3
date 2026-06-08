@@ -30,6 +30,11 @@ window.onerror = function(msg, url, lineNo, columnNo, error) {
 
 import App from './App.tsx';
 
+// Browser dev preview (npm run dev) — AU host injects this in the plugin WebView.
+if (typeof window !== 'undefined' && !window.__HOST_MODE__) {
+  window.__HOST_MODE__ = 'auv3';
+}
+
 function toggleDarkMode() {
   const prefersDarkScheme = window.matchMedia(
     '(prefers-color-scheme: dark)',
