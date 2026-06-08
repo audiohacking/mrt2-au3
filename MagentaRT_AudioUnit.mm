@@ -24,6 +24,7 @@
 #include "magenta_paths.h"
 #include "audio_level_processor.h"
 #include "SidechainReferenceCapture.h"
+#include <cmath>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
@@ -37,6 +38,14 @@ static const int kDevServerPort = 62420;
 // AU parameter addresses
 static const AUParameterAddress kParamAddressFxMode = 49;
 static const AUParameterAddress kParamAddressFxRefWindow = 50;
+static const AUParameterAddress kParamAddressSyncTempo = 51;
+static const AUParameterAddress kParamAddressBpmAlign = 52;
+
+// Reserved prompt slot for host BPM hint (not shown in the React UI).
+static const int kBpmPromptSlotIndex = 5;
+static constexpr float kBpmPromptWeight = 0.25f;
+static constexpr double kMinHostTempoBpm = 20.0;
+static constexpr double kMaxHostTempoBpm = 300.0;
 
 // Prompt slot used for live sidechain reference in FX mode.
 static const int kFxReferencePromptIndex = 0;
@@ -260,6 +269,12 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
     std::atomic<bool> _fxMode;
     std::atomic<bool> _referenceEncodeInFlight;
     std::atomic<int> _referenceEncodeTicks;
+    std::atomic<bool> _syncTempo;
+    std::atomic<bool> _bpmAlign;
+    std::atomic<double> _hostTempoBpm;
+    std::atomic<int> _sampleOffsetToNextBeat;
+    std::atomic<int> _playbackAlignSamplesRemaining;
+    std::atomic<int> _lastAppliedBpm;
 }
 
 // Fallback init — the extension system may call plain init before the factory method.
@@ -287,6 +302,12 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
     _fxMode.store(false, std::memory_order_relaxed);
     _referenceEncodeInFlight.store(false, std::memory_order_relaxed);
     _referenceEncodeTicks.store(0, std::memory_order_relaxed);
+    _syncTempo.store(false, std::memory_order_relaxed);
+    _bpmAlign.store(false, std::memory_order_relaxed);
+    _hostTempoBpm.store(0.0, std::memory_order_relaxed);
+    _sampleOffsetToNextBeat.store(0, std::memory_order_relaxed);
+    _playbackAlignSamplesRemaining.store(0, std::memory_order_relaxed);
+    _lastAppliedBpm.store(-1, std::memory_order_relaxed);
 
     for (int i = 0; i < 128; i++) {
         _midiNotes[i].store(false, std::memory_order_relaxed);
@@ -412,9 +433,23 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
         valueStrings:@[@"3 s", @"5 s", @"10 s"] dependentParameters:nil];
     fxRefWindowParam.value = 1.0; // 5 s default
 
+    AUParameter* syncTempoParam = [AUParameterTree
+        createParameterWithIdentifier:@"synctempo" name:@"Follow Tempo" address:kParamAddressSyncTempo min:0.0 max:1.0
+        unit:kAudioUnitParameterUnit_Boolean unitName:nil
+        flags:kAudioUnitParameterFlag_IsWritable | kAudioUnitParameterFlag_IsReadable
+        valueStrings:nil dependentParameters:nil];
+    syncTempoParam.value = 0.0;
+
+    AUParameter* bpmAlignParam = [AUParameterTree
+        createParameterWithIdentifier:@"bpmalign" name:@"Align Downbeat" address:kParamAddressBpmAlign min:0.0 max:1.0
+        unit:kAudioUnitParameterUnit_Boolean unitName:nil
+        flags:kAudioUnitParameterFlag_IsWritable | kAudioUnitParameterFlag_IsReadable
+        valueStrings:nil dependentParameters:nil];
+    bpmAlignParam.value = 0.0;
+
     NSMutableArray* allParams = [NSMutableArray arrayWithArray:@[
         tempParam, topkParam, cfgMusicCoCaParam, cfgNotesParam, volParam, muteParam, unmaskWidthParam, bufSizeParam, latencyCompParam,
-        cfgDrumsParam, fxModeParam, fxRefWindowParam
+        cfgDrumsParam, fxModeParam, fxRefWindowParam, syncTempoParam, bpmAlignParam
     ]];
     [allParams addObjectsFromArray:weightParams];
     [allParams addObjectsFromArray:@[resetParam, bypassParam, seedRotationParam]];
@@ -474,6 +509,15 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
                 }
             }
         }
+        else if (param.address == kParamAddressSyncTempo) {
+            const bool on = value > 0.5f;
+            weakSelf->_syncTempo.store(on, std::memory_order_relaxed);
+            weakSelf->_lastAppliedBpm.store(-1, std::memory_order_relaxed);
+            [weakSelf applyMergedPromptsToEngine];
+        }
+        else if (param.address == kParamAddressBpmAlign) {
+            weakSelf->_bpmAlign.store(value > 0.5f, std::memory_order_relaxed);
+        }
     };
     _parameterTree.implementorValueProvider = ^AUValue(AUParameter* param) {
         if (param.address == 0) return weakSelf->_engine.get_temperature();
@@ -503,6 +547,8 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
             AUParameter* p = [weakSelf->_parameterTree parameterWithAddress:kParamAddressFxRefWindow];
             return p ? p.value : 1.0f;
         }
+        else if (param.address == kParamAddressSyncTempo) return weakSelf->_syncTempo.load(std::memory_order_relaxed) ? 1.0f : 0.0f;
+        else if (param.address == kParamAddressBpmAlign) return weakSelf->_bpmAlign.load(std::memory_order_relaxed) ? 1.0f : 0.0f;
         return 0.0;
     };
 
@@ -663,6 +709,67 @@ static size_t FxReferenceWindowSamples(AUValue windowIndex) {
     });
 }
 
+- (double)hostTempoBpm {
+    return _hostTempoBpm.load(std::memory_order_relaxed);
+}
+
+- (void)applyMergedPromptsToEngine {
+    if (!_engine.is_loaded()) return;
+
+    const bool syncTempo = _syncTempo.load(std::memory_order_relaxed);
+    const int maxUserSlots = syncTempo ? kBpmPromptSlotIndex : 6;
+
+    std::vector<std::string> texts(6);
+    std::vector<float> weights(6, 0.0f);
+
+    NSArray* userPrompts = self.prompts;
+    const NSUInteger userCount = userPrompts ? userPrompts.count : 0;
+    float userWeightSum = 0.0f;
+    for (int i = 0; i < maxUserSlots; ++i) {
+        if ((NSUInteger)i >= userCount) break;
+        NSDictionary* p = userPrompts[i];
+        NSString* text = p[@"text"];
+        NSNumber* weight = p[@"weight"];
+        if ([text isKindOfClass:[NSString class]] && text.length > 0 &&
+            [weight isKindOfClass:[NSNumber class]]) {
+            texts[i] = text.UTF8String;
+            weights[i] = weight.floatValue;
+            userWeightSum += weights[i];
+        }
+    }
+
+    if (syncTempo) {
+        const double bpm = _hostTempoBpm.load(std::memory_order_relaxed);
+        if (bpm >= kMinHostTempoBpm && bpm <= kMaxHostTempoBpm) {
+            const int roundedBpm = static_cast<int>(std::lround(bpm));
+            texts[kBpmPromptSlotIndex] = std::to_string(roundedBpm) + " BPM";
+            weights[kBpmPromptSlotIndex] = kBpmPromptWeight;
+            if (userWeightSum > 0.0f) {
+                const float scale = (1.0f - kBpmPromptWeight) / userWeightSum;
+                for (int i = 0; i < kBpmPromptSlotIndex; ++i) {
+                    weights[i] *= scale;
+                }
+            }
+        }
+    }
+
+    _engine.set_text_prompts(texts, weights);
+    _engine.set_blend_weights(weights.data(), 6);
+}
+
+- (void)applyBpmPromptIfNeeded {
+    if (!_syncTempo.load(std::memory_order_relaxed)) return;
+    if (!_engine.is_loaded()) return;
+
+    const double bpm = _hostTempoBpm.load(std::memory_order_relaxed);
+    if (bpm < kMinHostTempoBpm || bpm > kMaxHostTempoBpm) return;
+
+    const int roundedBpm = static_cast<int>(std::lround(bpm));
+    if (roundedBpm == _lastAppliedBpm.load(std::memory_order_relaxed)) return;
+    _lastAppliedBpm.store(roundedBpm, std::memory_order_relaxed);
+    [self applyMergedPromptsToEngine];
+}
+
 
 - (NSTimeInterval)latency {
     return _engine.get_latency_samples() / 48000.0;
@@ -774,22 +881,17 @@ static size_t FxReferenceWindowSamples(AUValue windowIndex) {
                     BOOL success = self->_engine.load_model(mlxfnPath.UTF8String);
                     if (success) {
                         if (self.prompts) {
-                            std::vector<std::string> std_texts;
-                            std::vector<float> std_weights;
-                            for (NSDictionary* p in self.prompts) {
-                                NSString* text = p[@"text"];
-                                NSNumber* weight = p[@"weight"];
-                                BOOL isValid = [text isKindOfClass:[NSString class]] && [weight isKindOfClass:[NSNumber class]];
-                                std_texts.push_back(isValid ? text.UTF8String : "");
-                                std_weights.push_back(isValid ? weight.floatValue : 0.0f);
-                            }
-                            self->_engine.set_text_prompts(std_texts, std_weights);
-                            self->_engine.set_blend_weights(std_weights.data(), (int)std_weights.size());
-                            // Sync to AU parameter tree
                             dispatch_async(dispatch_get_main_queue(), ^{
-                                for (int i = 0; i < (int)std_weights.size() && i < 6; i++) {
-                                    AUParameter* wp = [self->_parameterTree parameterWithAddress:10 + i];
-                                    if (wp) [wp setValue:std_weights[i] originator:nil];
+                                [self applyMergedPromptsToEngine];
+                                if (self.prompts) {
+                                    for (NSUInteger i = 0; i < self.prompts.count && i < 6; i++) {
+                                        NSDictionary* p = self.prompts[i];
+                                        NSNumber* weight = p[@"weight"];
+                                        if ([weight isKindOfClass:[NSNumber class]]) {
+                                            AUParameter* wp = [self->_parameterTree parameterWithAddress:10 + (AUParameterAddress)i];
+                                            if (wp) [wp setValue:weight.floatValue originator:nil];
+                                        }
+                                    }
                                 }
                             });
                         }
@@ -1067,6 +1169,13 @@ static OSStatus ConverterDataProc(AudioConverterRef inAudioConverter,
                         }
                     }
                 }
+                else if (paramEvent.parameterAddress == kParamAddressSyncTempo) {
+                    unsafeSelf->_syncTempo.store(paramEvent.value > 0.5f, std::memory_order_relaxed);
+                    unsafeSelf->_lastAppliedBpm.store(-1, std::memory_order_relaxed);
+                }
+                else if (paramEvent.parameterAddress == kParamAddressBpmAlign) {
+                    unsafeSelf->_bpmAlign.store(paramEvent.value > 0.5f, std::memory_order_relaxed);
+                }
             } else if (event->head.eventType == AURenderEventMIDI) {
                 if (unsafeSelf->_fxMode.load(std::memory_order_relaxed)) {
                     continue; // FX mode: ignore MIDI from host
@@ -1134,35 +1243,52 @@ static OSStatus ConverterDataProc(AudioConverterRef inAudioConverter,
             }
         }
 
+        __unsafe_unretained AUHostMusicalContextBlock musicalContextBlock =
+            (__bridge AUHostMusicalContextBlock)(unsafeSelf->_musicalContextBlockPtr);
+
+        if (musicalContextBlock) {
+            double currentTempo = 0;
+            double currentBeatPosition = 0;
+            NSInteger sampleOffsetToNextBeat = 0;
+            if (musicalContextBlock(&currentTempo, NULL, NULL, &currentBeatPosition,
+                                    &sampleOffsetToNextBeat, NULL)) {
+                if (currentTempo >= kMinHostTempoBpm && currentTempo <= kMaxHostTempoBpm) {
+                    unsafeSelf->_hostTempoBpm.store(currentTempo, std::memory_order_relaxed);
+                }
+                if (sampleOffsetToNextBeat >= 0) {
+                    unsafeSelf->_sampleOffsetToNextBeat.store(
+                        static_cast<int>(sampleOffsetToNextBeat), std::memory_order_relaxed);
+                }
+                if (currentBeatPosition == 0.0 && !wasBeatZero) {
+                    engine->trigger_transport_reset();
+                }
+                wasBeatZero = (currentBeatPosition == 0.0);
+            }
+        }
+
         // Edge detection from stopped to playing
         if (isPlaying && !wasPlaying) {
-            engine->reset_for_playback();
+            const bool alignDownbeat = unsafeSelf->_bpmAlign.load(std::memory_order_relaxed);
+            const int offsetSamples = unsafeSelf->_sampleOffsetToNextBeat.load(std::memory_order_relaxed);
+            if (alignDownbeat && offsetSamples > 0) {
+                unsafeSelf->_playbackAlignSamplesRemaining.store(offsetSamples, std::memory_order_relaxed);
+            } else {
+                engine->reset_for_playback();
+            }
             if (resampler) {
                 AudioConverterReset(resampler);
             }
         }
         wasPlaying = isPlaying;
 
-        // Auto-reset when currentBeatPosition is exactly 0. This edge-detects the
-        // transition to beat 0.0 so that resets are only triggered once (e.g., when the
-        // timeline loops back to start, but not repeatedly if user pauses at the start).
-        __unsafe_unretained AUHostMusicalContextBlock musicalContextBlock =
-            (__bridge AUHostMusicalContextBlock)(unsafeSelf->_musicalContextBlockPtr);
-
-        if (musicalContextBlock) {
-            double currentBeatPosition = 0;
-            if (musicalContextBlock(NULL, NULL, NULL, &currentBeatPosition, NULL, NULL)) {
-                if (currentBeatPosition == 0.0 && !wasBeatZero) {
-                    // Transport-rewind reset (DAW timeline jumped back to
-                    // beat 0). Suppressible: a freshly-prefilled context
-                    // arms a one-shot skip so re-cuing the DAW after
-                    // clicking Audio Prefill / Silent Prefill doesn't wipe
-                    // the prefill. User-initiated resets (resetModel,
-                    // param 31) take a different path and are never
-                    // suppressed.
-                    engine->trigger_transport_reset();
-                }
-                wasBeatZero = (currentBeatPosition == 0.0);
+        int alignRemaining = unsafeSelf->_playbackAlignSamplesRemaining.load(std::memory_order_relaxed);
+        if (alignRemaining > 0 && isPlaying) {
+            const int next = alignRemaining - static_cast<int>(frameCount);
+            if (next <= 0) {
+                unsafeSelf->_playbackAlignSamplesRemaining.store(0, std::memory_order_relaxed);
+                engine->reset_for_playback();
+            } else {
+                unsafeSelf->_playbackAlignSamplesRemaining.store(next, std::memory_order_relaxed);
             }
         }
 
@@ -1258,6 +1384,7 @@ static OSStatus ConverterDataProc(AudioConverterRef inAudioConverter,
     NSMutableDictionary* _lastParams;
     int _metricsTicks;
     int _fxEncodeCounter;
+    int _bpmPromptCounter;
     BOOL _weightChangeFromUI;  // set by textPrompts handler, cleared by polling loop
 
     NSURL* _modelDirectoryURL;
@@ -1478,6 +1605,16 @@ static NSString* bankFilePathAU(int index) {
         _fxEncodeCounter = 0;
     }
 
+    const double hostBpm = [au hostTempoBpm];
+    if (hostBpm >= kMinHostTempoBpm && hostBpm <= kMaxHostTempoBpm) {
+        stateUpdate[@"hostBpm"] = @(hostBpm);
+    }
+    _bpmPromptCounter++;
+    if (_bpmPromptCounter >= 50) {
+        _bpmPromptCounter = 0;
+        [au applyBpmPromptIfNeeded];
+    }
+
     if (_metricsTicks >= 5) {
         _metricsTicks = 0;
         EngineMetrics m = engine->get_metrics();
@@ -1541,7 +1678,7 @@ static NSString* bankFilePathAU(int index) {
 
     NSMutableDictionary* params = [NSMutableDictionary dictionary];
     NSMutableDictionary* weightChanges = [NSMutableDictionary dictionary];
-    for (int i = 0; i <= 50; i++) {
+    for (int i = 0; i <= 52; i++) {
         NSString* key = paramKeyForAddress(i);
         if (!key) continue;
         AUParameter* param = [au.parameterTree parameterWithAddress:i];
@@ -1607,6 +1744,8 @@ static NSString* paramKeyForAddress(AUParameterAddress address) {
         case 48: return @"cfgdrums";
         case 49: return @"fxmode";
         case 50: return @"fxrefwindow";
+        case 51: return @"synctempo";
+        case 52: return @"bpmalign";
         default:
             return nil;
     }
@@ -1614,7 +1753,7 @@ static NSString* paramKeyForAddress(AUParameterAddress address) {
 
 static BOOL paramIsBool(AUParameterAddress address) {
     if (address == 6 || address == 9 || address == 31 || address == 32 || address == 39 || (address >= 40 && address <= 46)) return YES;
-    if (address == 49) return YES; // indexed 0/1 treated as bool in UI sync
+    if (address == 49 || address == 51 || address == 52) return YES;
     return NO;
 }
 
@@ -1623,7 +1762,7 @@ static BOOL paramIsBool(AUParameterAddress address) {
     if (!au) return;
 
     NSMutableDictionary* initialParams = [NSMutableDictionary dictionary];
-    for (int i = 0; i <= 50; i++) {
+    for (int i = 0; i <= 52; i++) {
         // Skip weight params — prompts carry their own weights via textPrompts.
         if (i >= 10 && i <= 15) continue;
         AUParameter* param = [au.parameterTree parameterWithAddress:i];
@@ -1756,27 +1895,14 @@ static BOOL paramIsBool(AUParameterAddress address) {
             if ([promptsArray isKindOfClass:[NSArray class]] && _audioUnit) {
                 MagentaRTAudioUnit* au = (MagentaRTAudioUnit*)_audioUnit;
                 au.prompts = promptsArray;
-                RealtimeRunner* engine = [au engine];
-                if (engine) {
-                    std::vector<std::string> std_texts;
-                    std::vector<float> std_weights;
-                    for (NSDictionary* p in promptsArray) {
-                        NSString* text = p[@"text"];
-                        NSNumber* weight = p[@"weight"];
-                        BOOL isValid = [text isKindOfClass:[NSString class]] && [weight isKindOfClass:[NSNumber class]];
-                        std_texts.push_back(isValid ? text.UTF8String : "");
-                        std_weights.push_back(isValid ? weight.floatValue : 0.0f);
-                    }
-                    engine->set_text_prompts(std_texts, std_weights);
-                    // Push explicit blend weights to the engine
-                    engine->set_blend_weights(std_weights.data(), (int)std_weights.size());
-                    // Flag so the polling loop knows this weight change came from the UI
-                    // (not DAW automation) and should not trigger a mode switch.
-                    _weightChangeFromUI = YES;
-                    // Sync weights to AU parameter tree so DAW knobs track UI changes
-                    for (int i = 0; i < (int)std_weights.size() && i < 6; i++) {
-                        AUParameter* wp = [au.parameterTree parameterWithAddress:10 + i];
-                        if (wp) [wp setValue:std_weights[i] originator:nil];
+                [au applyMergedPromptsToEngine];
+                _weightChangeFromUI = YES;
+                for (NSUInteger i = 0; i < promptsArray.count && i < 6; i++) {
+                    NSDictionary* p = promptsArray[i];
+                    NSNumber* weight = p[@"weight"];
+                    if ([weight isKindOfClass:[NSNumber class]]) {
+                        AUParameter* wp = [au.parameterTree parameterWithAddress:10 + (AUParameterAddress)i];
+                        if (wp) [wp setValue:weight.floatValue originator:nil];
                     }
                 }
             }

@@ -58,7 +58,18 @@ The live sidechain reference updates **Prompt 1** (first prompt slot) via MusicC
 
 ---
 
-## 4. Reporting Issues
+## 4. Tempo Sync (Follow Tempo / Align Downbeat)
+
+Optional settings in the plugin UI (AUv3 only):
+
+* **Follow Tempo:** Reads the host project BPM (Logic musical context) and injects a hidden style prompt such as `120 BPM` to steer generation. Updates when tempo changes.
+* **Align Downbeat:** When playback starts, delays the internal buffer reset until the next host downbeat so generation begins closer to the grid.
+
+These are soft hints — the model has no dedicated BPM input. **Delay Comp** still handles sample-accurate track alignment with the rest of the mix.
+
+---
+
+## 5. Reporting Issues
 
 If you encounter bugs, performance issues, or crash logs, please report them at:
 👉 https://github.com/magenta/magenta-realtime/issues

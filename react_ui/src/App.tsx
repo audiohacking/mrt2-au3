@@ -74,9 +74,11 @@ const paramKeyForAddress: Record<number, string> = {
   48: 'cfgdrums',
   49: 'fxmode',
   50: 'fxrefwindow',
+  51: 'synctempo',
+  52: 'bpmalign',
 };
 
-const boolParams = new Set([6, 9, 31, 32, 39, 45, 46, 49]);
+const boolParams = new Set([6, 9, 31, 32, 39, 45, 46, 49, 51, 52]);
 
 // ─── Computer keyboard → MIDI (Ableton Live layout) ──────────────────────────
 // Base row (lower octave): A S D F G H J = C D E F G A B, with W E T Y U as
@@ -109,6 +111,8 @@ const DEFAULT_PARAMS = {
   onsetmode: false,
   fxmode: false,
   fxrefwindow: 1,
+  synctempo: false,
+  bpmalign: false,
 };
 
 // Default surface positions (normalised 0–1) — purely frontend state
@@ -144,6 +148,7 @@ export default function App() {
     refRightLevel: 0,
     droppedFrames: 0,
     transportFlags: -1,
+    hostBpm: 0,
   });
 
   const [isPlaying, setIsPlaying] = useState(false);
@@ -442,6 +447,9 @@ export default function App() {
           refLeftLevel: state.referenceLevels.left,
           refRightLevel: state.referenceLevels.right,
         }));
+      }
+      if (state.hostBpm !== undefined) {
+        setMetrics(m => ({ ...m, hostBpm: state.hostBpm }));
       }
       if (state.modelName !== undefined) setModelName(state.modelName);
       if (state.isPlaying !== undefined) setIsPlaying(state.isPlaying);
@@ -1026,6 +1034,27 @@ export default function App() {
                   onChange={(v) => sendParamChange(49, v ? 1 : 0)}
                   tooltip="Use a sidechain reference from another track instead of MIDI. Route reference audio via Logic's Side Chain menu on this track."
                 />
+              )}
+              {isAUv3 && (
+                <MagentaToggle
+                  label="Follow Tempo"
+                  checked={params.synctempo}
+                  onChange={(v) => sendParamChange(51, v ? 1 : 0)}
+                  tooltip="Injects the DAW project tempo into a hidden style prompt (e.g. 120 BPM) to steer generation. Requires the host to provide tempo via the plugin's musical context."
+                />
+              )}
+              {isAUv3 && (
+                <MagentaToggle
+                  label="Align Downbeat"
+                  checked={params.bpmalign}
+                  onChange={(v) => sendParamChange(52, v ? 1 : 0)}
+                  tooltip="When playback starts, delays buffer reset until the next host downbeat so generation begins on the grid."
+                />
+              )}
+              {isAUv3 && metrics.hostBpm > 0 && (
+                <span style={{ fontSize: '11px', opacity: 0.55, marginLeft: '4px' }}>
+                  Host: {Math.round(metrics.hostBpm)} BPM
+                </span>
               )}
             </div>
           </div>

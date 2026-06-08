@@ -37,6 +37,9 @@ using magentart::core::RealtimeRunner;
 - (void)readReferenceLevels:(float*)outLeft right:(float*)outRight;
 - (BOOL)isFxMode;
 - (void)encodeSidechainReferenceIfNeeded;
+- (void)applyMergedPromptsToEngine;
+- (void)applyBpmPromptIfNeeded;
+- (double)hostTempoBpm;
 @end
 
 @interface MagentaRTViewController : AUViewController <AUAudioUnitFactory>
