@@ -106,7 +106,25 @@ Model loading splits into three layers. Only the first two are fork-owned.
 
 ## Fork-owned files to add or adapt
 
-### 1. `YourModelPaths.{h,mm}`
+### 1. `YourModelDownloader.{h,mm}`
+
+Copy from mrt2-au3:
+
+- [MRT2ModelDownloader.h](https://github.com/audiohacking/mrt2-au3/blob/main/MRT2ModelDownloader.h)
+- [MRT2ModelDownloader.mm](https://github.com/audiohacking/mrt2-au3/blob/main/MRT2ModelDownloader.mm)
+
+Link this instead of upstream `MagentaModelDownloader.mm`. The fork downloader:
+
+- Writes to `NSHomeDirectoryForUser` + `Documents/Magenta/magenta-rt-v2` (not the sandbox container)
+- Creates `models/`, `resources/`, `banks/` and verifies write access before downloading
+- Skips files that already exist with the expected byte size (resume-friendly)
+- Retries each file up to 3 times on network or install failure
+- Uses a serial download queue, long timeouts, and `copyItem` fallback when `moveItem` fails
+- Lists `mrt2_small` first in the remote model picker
+
+After a successful onboarding download, native code must call `MGRTEnsureCustomResourcesPath`, then `ensureAssetsInitialized` on the bootstrap queue before auto-loading the model.
+
+### 2. `YourModelPaths.{h,mm}`
 
 Copy and rename from mrt2-au3:
 
@@ -143,7 +161,7 @@ Add the `.mm` to your plugin target in `CMakeLists.txt` (see [CMakeLists.txt](ht
 
 ---
 
-### 2. `MGRT*` helpers in the view controller / AU file
+### 3. `MGRT*` helpers in the view controller / AU file
 
 Merge the static helpers from [MagentaRT_AudioUnit.mm](https://github.com/audiohacking/mrt2-au3/blob/main/MagentaRT_AudioUnit.mm) (search for `MGRTModelsFolderBookmark` through `MGRTPreferredModelName`). Rename the `MGRT` prefix to match your plugin if desired.
 
@@ -163,7 +181,7 @@ Merge the static helpers from [MagentaRT_AudioUnit.mm](https://github.com/audioh
 
 ---
 
-### 3. Thread-safe asset initialization (required)
+### 4. Thread-safe asset initialization (required)
 
 `MLXEngine::init_assets()` is **not** re-entrant. Concurrent calls from the main thread and a background queue caused Logic Pro crashes (`EXC_BAD_ACCESS` in SentencePiece during `init_assets`).
 
@@ -208,7 +226,7 @@ See [ensureAssetsInitialized](https://github.com/audiohacking/mrt2-au3/blob/main
 
 ---
 
-### 4. React UI onboarding gate
+### 5. React UI onboarding gate
 
 If your plugin uses the shared React shell (`ResourceOnboardingModal`, `ModelSelector` from `@magenta-rt/common`), apply the gate from [react_ui/src/App.tsx](https://github.com/audiohacking/mrt2-au3/blob/main/react_ui/src/App.tsx):
 
@@ -291,6 +309,7 @@ Use this when adding the fix to a new Magenta AU fork (JAM3, mrt2, etc.):
 
 ### Fork code
 
+- [ ] Copy `MRT2ModelDownloader.{h,mm}` and link instead of upstream `MagentaModelDownloader.mm`
 - [ ] Copy/rename `MRT2ModelPaths.{h,mm}` → `YourModelPaths.{h,mm}`
 - [ ] Add `.mm` to plugin CMake target
 - [ ] Merge `MGRT*` helpers into your `*_AudioUnit.mm`

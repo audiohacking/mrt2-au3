@@ -21,7 +21,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import "MagentaModelManager.h"
-#import "MagentaModelDownloader.h"
+#import "MRT2ModelDownloader.h"
 #include "magenta_paths.h"
 #include "audio_level_processor.h"
 #include "SidechainReferenceCapture.h"
@@ -1504,6 +1504,7 @@ static OSStatus ConverterDataProc(AudioConverterRef inAudioConverter,
     NSURL* _pendingDragURL;
     BOOL _promptedForModelsFolder;
     BOOL _autoLoadScheduled;
+    BOOL _downloadInProgress;
 }
 
 // ── Bank file paths (emulator-style save states) ─────────────────────────────
@@ -2060,7 +2061,7 @@ static BOOL paramIsBool(AUParameterAddress address) {
             }
         }
         else if ([type isEqualToString:@"listRemoteModels"]) {
-            [MagentaModelDownloader listRemoteModelsWithCompletion:^(NSArray<NSString *> *models, NSError *error) {
+            [MRT2ModelDownloader listRemoteModelsWithCompletion:^(NSArray<NSString *> *models, NSError *error) {
                 if (error) {
                     [self sendStateUpdate:@{@"remoteModelsError": error.localizedDescription}];
                 } else {
@@ -2071,7 +2072,12 @@ static BOOL paramIsBool(AUParameterAddress address) {
         else if ([type isEqualToString:@"downloadModel"]) {
             NSString* name = body[@"name"];
             if (name) {
-                [MagentaModelDownloader downloadModel:name progress:^(double progress, NSString *status) {
+                if (self->_downloadInProgress) {
+                    [self writeDiskLog:@"downloadModel: download already in progress"];
+                    return;
+                }
+                self->_downloadInProgress = YES;
+                [MRT2ModelDownloader downloadModel:name progress:^(double progress, NSString *status) {
                     [self sendStateUpdate:@{
                         @"downloadProgress": @{
                             @"status": @"downloading",
@@ -2081,6 +2087,7 @@ static BOOL paramIsBool(AUParameterAddress address) {
                         }
                     }];
                 } completion:^(BOOL success, NSError *error) {
+                    self->_downloadInProgress = NO;
                     if (success) {
                         [self sendStateUpdate:@{
                             @"downloadProgress": @{
@@ -3014,9 +3021,34 @@ static BOOL paramIsBool(AUParameterAddress address) {
 }
 
 - (void)handleInitResources:(NSString *)modelName {
-    BOOL hasModel = modelName && modelName.length > 0;
+    if (!modelName || modelName.length == 0) {
+        modelName = @"mrt2_small";
+    }
+    if (_downloadInProgress) {
+        [self writeDiskLog:@"handleInitResources: download already in progress"];
+        return;
+    }
+    _downloadInProgress = YES;
 
-    [MagentaModelDownloader initializeSharedResourcesWithProgress:^(double progress, NSString *status) {
+    NSString* destPath = [MRT2ModelDownloader magentaHomePath];
+    [self writeDiskLog:[NSString stringWithFormat:@"handleInitResources: downloading to %@", destPath]];
+
+    NSError* readyError = nil;
+    if (![MRT2ModelDownloader ensureMagentaHomeReady:&readyError]) {
+        _downloadInProgress = NO;
+        [self sendStateUpdate:@{
+            @"resourcesProgress": @{
+                @"status": @"error",
+                @"percent": @(0.0),
+                @"text": readyError.localizedDescription ?: @"Cannot create Magenta folder"
+            }
+        }];
+        return;
+    }
+
+    BOOL hasModel = modelName.length > 0;
+
+    [MRT2ModelDownloader initializeSharedResourcesWithProgress:^(double progress, NSString *status) {
         double scaledPercent = hasModel ? progress * 0.5 : progress;
         NSString *statusWithProgress = hasModel
             ? [NSString stringWithFormat:@"[1/2] Shared assets: %@", status]
@@ -3031,6 +3063,7 @@ static BOOL paramIsBool(AUParameterAddress address) {
         }];
     } completion:^(BOOL success, NSError *error) {
         if (!success) {
+            self->_downloadInProgress = NO;
             [self sendStateUpdate:@{
                 @"resourcesProgress": @{
                     @"status": @"error",
@@ -3041,8 +3074,10 @@ static BOOL paramIsBool(AUParameterAddress address) {
             return;
         }
 
+        MGRTEnsureCustomResourcesPath();
+
         if (hasModel) {
-            [MagentaModelDownloader downloadModel:modelName progress:^(double progress, NSString *status) {
+            [MRT2ModelDownloader downloadModel:modelName progress:^(double progress, NSString *status) {
                 double scaledPercent = 0.5 + (progress * 0.5);
                 [self sendStateUpdate:@{
                     @"resourcesProgress": @{
@@ -3052,6 +3087,7 @@ static BOOL paramIsBool(AUParameterAddress address) {
                     }
                 }];
             } completion:^(BOOL dlSuccess, NSError *dlError) {
+                self->_downloadInProgress = NO;
                 if (dlSuccess) {
                     [self sendStateUpdate:@{
                         @"resourcesProgress": @{
@@ -3061,8 +3097,16 @@ static BOOL paramIsBool(AUParameterAddress address) {
                         },
                         @"resourcesMissing": @NO
                     }];
-                    [self handleListLocalModels];
-                    [self handleSelectModel:modelName];
+                    dispatch_async(MRT2BootstrapQueue(), ^{
+                        if (self->_audioUnit) {
+                            MagentaRTAudioUnit* au = (MagentaRTAudioUnit*)self->_audioUnit;
+                            [au ensureAssetsInitialized];
+                        }
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            [self handleListLocalModels];
+                            [self handleSelectModel:modelName];
+                        });
+                    });
                 } else {
                     [self sendStateUpdate:@{
                         @"resourcesProgress": @{
@@ -3074,6 +3118,7 @@ static BOOL paramIsBool(AUParameterAddress address) {
                 }
             }];
         } else {
+            self->_downloadInProgress = NO;
             [self sendStateUpdate:@{
                 @"resourcesProgress": @{
                     @"status": @"success",
@@ -3082,7 +3127,15 @@ static BOOL paramIsBool(AUParameterAddress address) {
                 },
                 @"resourcesMissing": @NO
             }];
-            [self handleListLocalModels];
+            dispatch_async(MRT2BootstrapQueue(), ^{
+                if (self->_audioUnit) {
+                    MagentaRTAudioUnit* au = (MagentaRTAudioUnit*)self->_audioUnit;
+                    [au ensureAssetsInitialized];
+                }
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self handleListLocalModels];
+                });
+            });
         }
     }];
 }

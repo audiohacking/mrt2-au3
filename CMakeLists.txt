@@ -200,9 +200,9 @@ set_source_files_properties(${APP_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION "Reso
 add_executable(mrt2_au MACOSX_BUNDLE
   MagentaRT_AudioUnit.mm
   MRT2ModelPaths.mm
+  MRT2ModelDownloader.mm
   ${MRT2_COMMON_DIR}/cpp/magenta_paths.cpp
   ${MRT2_COMMON_DIR}/objc/MagentaModelManager.mm
-  ${MRT2_COMMON_DIR}/objc/MagentaModelDownloader.mm
   ${APP_ICON}
 )
 

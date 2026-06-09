@@ -457,7 +457,12 @@ export default function App() {
       if (state.isPlaying !== undefined) setIsPlaying(state.isPlaying);
       if (state.localModels !== undefined) setLocalModels(state.localModels);
       if (state.remoteModels !== undefined) {
-        setRemoteModels(state.remoteModels);
+        const models = state.remoteModels as string[];
+        if (models.includes('mrt2_small')) {
+          setRemoteModels(['mrt2_small', ...models.filter((m) => m !== 'mrt2_small')]);
+        } else {
+          setRemoteModels(models);
+        }
         setIsFetchingModels(false);
       }
       if (state.remoteModelsError !== undefined) {
@@ -1514,7 +1519,7 @@ export default function App() {
           isFetchingModels={isFetchingModels}
 
           onSelectFolder={() => postMessage({ type: 'selectDownloadFolder' })}
-          onStartDownload={(modelName) => postMessage({ type: 'initResources', modelName })}
+          onStartDownload={(modelName) => postMessage({ type: 'initResources', modelName: modelName || 'mrt2_small' })}
         />
       )}
 
