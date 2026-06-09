@@ -27,6 +27,7 @@
 #include "SidechainReferenceCapture.h"
 #include <cmath>
 #include <memory>
+#include <mutex>
 
 #ifndef MRT2_AU_SIDECHAIN_INPUT_BUSES
 #define MRT2_AU_SIDECHAIN_INPUT_BUSES 0
@@ -58,6 +59,18 @@ static const int kFxReferencePromptIndex = 0;
 
 // MusicCoCa expects 10 s of mono audio at 16 kHz.
 static const int kMusicCoCaMonoFrames = 160000;
+
+static const CGFloat kMRT2UIWidth = 1236.0;  // ~15% wider than 1075 for Logic at 100% zoom
+static const CGFloat kMRT2UIHeight = 470.0;
+
+static dispatch_queue_t MRT2BootstrapQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        queue = dispatch_queue_create("com.audiohacking.mrt2.bootstrap", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
 
 // Sidechain pull buffer for render callback (Apple BufferedInputBus pattern).
 struct SidechainPullBuffer {
@@ -319,6 +332,7 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
     std::atomic<int> _sampleOffsetToNextBeat;
     std::atomic<int> _playbackAlignSamplesRemaining;
     std::atomic<int> _lastAppliedBpm;
+    std::mutex _assetsInitMutex;
 }
 
 // Fallback init — the extension system may call plain init before the factory method.
@@ -326,8 +340,8 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
 - (instancetype)init {
     AudioComponentDescription desc = {
         .componentType = kAudioUnitType_MusicDevice,
-        .componentSubType = 'MGRT',
-        .componentManufacturer = 'Goog',
+        .componentSubType = 'MGR2',
+        .componentManufacturer = 'AHck',
         .componentFlags = 0,
         .componentFlagsMask = 0
     };
@@ -637,13 +651,11 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
                                                              busses:@[_dummyInputBus, _sidechainBus]];
 #endif
 
-    // Assets are finalized in ensureAssetsInitialized (also retried from connectToAU / loadModelAtPath).
-    if (![self ensureAssetsInitialized]) {
-        if (!self.logHistory) {
-            self.logHistory = [NSMutableArray array];
-        }
-        [self.logHistory addObject:@"init_assets deferred — will retry when UI connects"];
+    // init_assets runs only on MRT2BootstrapQueue (see ensureAssetsInitialized / connectToAU).
+    if (!self.logHistory) {
+        self.logHistory = [NSMutableArray array];
     }
+    [self.logHistory addObject:@"init_assets deferred — will retry when UI connects"];
 
     self.maximumFramesToRender = 4096;
 
@@ -712,6 +724,8 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
 }
 
 - (BOOL)ensureAssetsInitialized {
+    std::lock_guard<std::mutex> lock(_assetsInitMutex);
+
     MGRTEnsureCustomResourcesPath();
 
     NSString* resourcesPath = [[NSUserDefaults standardUserDefaults] stringForKey:@"MagentaRT_CustomResourcesPath"];
@@ -958,7 +972,7 @@ static size_t FxReferenceWindowSamples(AUValue windowIndex) {
                     [url stopAccessingSecurityScopedResource];
                 } else {
                 // Perform async load so we don't block AU initialization
-                dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                dispatch_async(MRT2BootstrapQueue(), ^{
                     if (![self ensureAssetsInitialized]) {
                         NSLog(@"MagentaRT_AU: applyCustomState model load skipped — assets not ready");
                         [url stopAccessingSecurityScopedResource];
@@ -1467,6 +1481,7 @@ static OSStatus ConverterDataProc(AudioConverterRef inAudioConverter,
 - (NSString*)mlxfnPathForModelAtURL:(NSURL*)modelURL;
 - (void)saveLoadedModelBookmarkForURL:(NSURL*)modelURL modelName:(NSString*)modelName;
 - (void)autoLoadSavedModelIfNeeded;
+- (void)runAutoLoadBootstrap;
 - (void)tryAutoLoadFromModelsDirectory;
 - (void)promptForModelsFolderIfNeeded;
 @end
@@ -1488,6 +1503,7 @@ static OSStatus ConverterDataProc(AudioConverterRef inAudioConverter,
     NSURL* _modelDirectoryURL;
     NSURL* _pendingDragURL;
     BOOL _promptedForModelsFolder;
+    BOOL _autoLoadScheduled;
 }
 
 // ── Bank file paths (emulator-style save states) ─────────────────────────────
@@ -1562,12 +1578,12 @@ static NSString* bankFilePathAU(int index) {
 }
 
 - (void)loadView {
-    NSView* view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 1075, 470)];
+    NSView* view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, kMRT2UIWidth, kMRT2UIHeight)];
     view.wantsLayer = YES;
     view.layer.backgroundColor = [NSColor colorWithRed:0.15 green:0.15 blue:0.2 alpha:1.0].CGColor;
 
     self.view = view;
-    self.preferredContentSize = NSMakeSize(1075, 470);
+    self.preferredContentSize = NSMakeSize(kMRT2UIWidth, kMRT2UIHeight);
 }
 
 - (void)viewWillAppear {
@@ -1631,8 +1647,8 @@ static NSString* bankFilePathAU(int index) {
     [super viewDidAppear];
 
     if (self.view.window) {
-        self.view.window.minSize = NSMakeSize(1075, 470);
-        self.view.window.maxSize = NSMakeSize(1075, 470);
+        self.view.window.minSize = NSMakeSize(kMRT2UIWidth, kMRT2UIHeight);
+        self.view.window.maxSize = NSMakeSize(kMRT2UIWidth, kMRT2UIHeight);
     }
 
     if (_metricsTimer) {
@@ -1932,9 +1948,6 @@ static BOOL paramIsBool(AUParameterAddress address) {
     stateUpdate[@"downloadPath"] = savedPath;
 
     MGRTEnsureCustomResourcesPath();
-    if (mrtAu) {
-        [mrtAu ensureAssetsInitialized];
-    }
     stateUpdate[@"resourcesMissing"] = @(!MGRTSharedResourcesAvailable(mrtAu));
 
     [self sendStateUpdate:stateUpdate];
@@ -2349,84 +2362,69 @@ static BOOL paramIsBool(AUParameterAddress address) {
 
 - (void)autoLoadSavedModelIfNeeded {
     if (!self->_audioUnit) return;
+    if (_autoLoadScheduled) return;
+    _autoLoadScheduled = YES;
+
+    dispatch_async(MRT2BootstrapQueue(), ^{
+        [self runAutoLoadBootstrap];
+    });
+}
+
+- (void)runAutoLoadBootstrap {
+    if (!self->_audioUnit) return;
     MagentaRTAudioUnit* m_au = (MagentaRTAudioUnit*)self->_audioUnit;
     RealtimeRunner* engine = [m_au engine];
     if (!engine || engine->is_loaded()) return;
 
-    if (m_au.modelBookmark) {
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            BOOL stale = NO;
-            NSError* error = nil;
-            NSURL* url = [NSURL URLByResolvingBookmarkData:m_au.modelBookmark
-                                                   options:NSURLBookmarkResolutionWithoutUI | NSURLBookmarkResolutionWithSecurityScope
-                                             relativeToURL:nil
-                                       bookmarkDataIsStale:&stale
-                                                     error:&error];
-            if (url && [url startAccessingSecurityScopedResource]) {
-                NSString* mlxfnPath = [self mlxfnPathForModelAtURL:url];
-                BOOL loaded = mlxfnPath && [self loadModelAtPath:mlxfnPath];
-                if (loaded) {
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        [self saveLoadedModelBookmarkForURL:url
-                                                  modelName:m_au.modelName ?: mlxfnPath.lastPathComponent];
-                    });
-                } else {
-                    [self writeDiskLog:@"connectToAU: AU model bookmark load failed, scanning default paths"];
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        [self tryAutoLoadFromModelsDirectory];
-                    });
-                }
-                [url stopAccessingSecurityScopedResource];
-                return;
-            }
-            [self writeDiskLog:[NSString stringWithFormat:@"connectToAU: Failed to resolve AU model bookmark: %@", error]];
+    if (![m_au ensureAssetsInitialized]) {
+        [self writeDiskLog:@"runAutoLoadBootstrap: assets not initialized"];
+        return;
+    }
+
+    auto tryBookmark = ^BOOL(NSData* bookmarkData, NSString* logLabel) {
+        if (!bookmarkData) return NO;
+        BOOL stale = NO;
+        NSError* error = nil;
+        NSURL* url = [NSURL URLByResolvingBookmarkData:bookmarkData
+                                               options:NSURLBookmarkResolutionWithoutUI | NSURLBookmarkResolutionWithSecurityScope
+                                         relativeToURL:nil
+                                   bookmarkDataIsStale:&stale
+                                                 error:&error];
+        if (!url) {
+            [self writeDiskLog:[NSString stringWithFormat:@"%@: bookmark resolve failed: %@", logLabel, error]];
+            return NO;
+        }
+        if (![url startAccessingSecurityScopedResource]) {
+            [self writeDiskLog:[NSString stringWithFormat:@"%@: security scope failed for %@", logLabel, url.path]];
+            return NO;
+        }
+
+        NSString* mlxfnPath = [self mlxfnPathForModelAtURL:url];
+        BOOL loaded = mlxfnPath && [self loadModelAtPath:mlxfnPath];
+        if (loaded) {
+            NSString* savedModelName = [[NSUserDefaults standardUserDefaults] stringForKey:@"LoadedModelName"];
             dispatch_async(dispatch_get_main_queue(), ^{
-                [self tryAutoLoadFromModelsDirectory];
+                [self saveLoadedModelBookmarkForURL:url
+                                          modelName:savedModelName ?: m_au.modelName ?: mlxfnPath.lastPathComponent];
             });
-        });
+        }
+        [url stopAccessingSecurityScopedResource];
+        return loaded;
+    };
+
+    if (m_au.modelBookmark && tryBookmark(m_au.modelBookmark, @"connectToAU AU bookmark")) {
         return;
     }
 
     NSData* savedBookmark = [[NSUserDefaults standardUserDefaults] objectForKey:@"LoadedModelBookmark"];
     if (savedBookmark) {
         [self writeDiskLog:@"connectToAU: Auto-loading model from saved bookmark..."];
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            BOOL stale = NO;
-            NSError* error = nil;
-            NSURL* url = [NSURL URLByResolvingBookmarkData:savedBookmark
-                                                   options:NSURLBookmarkResolutionWithoutUI | NSURLBookmarkResolutionWithSecurityScope
-                                             relativeToURL:nil
-                                       bookmarkDataIsStale:&stale
-                                                     error:&error];
-            if (url && [url startAccessingSecurityScopedResource]) {
-                NSString* mlxfnPath = [self mlxfnPathForModelAtURL:url];
-                BOOL loaded = mlxfnPath && [self loadModelAtPath:mlxfnPath];
-                if (loaded) {
-                    NSString* savedModelName = [[NSUserDefaults standardUserDefaults] stringForKey:@"LoadedModelName"];
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        [self saveLoadedModelBookmarkForURL:url
-                                                  modelName:savedModelName ?: mlxfnPath.lastPathComponent];
-                    });
-                } else {
-                    [self writeDiskLog:@"connectToAU: saved model bookmark load failed, scanning default paths"];
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        [self tryAutoLoadFromModelsDirectory];
-                    });
-                }
-                [url stopAccessingSecurityScopedResource];
-                return;
-            }
-            [self writeDiskLog:[NSString stringWithFormat:@"connectToAU: Failed to resolve saved model bookmark: %@", error]];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self tryAutoLoadFromModelsDirectory];
-            });
-        });
-        return;
+        if (tryBookmark(savedBookmark, @"connectToAU saved bookmark")) {
+            return;
+        }
     }
 
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        [self tryAutoLoadFromModelsDirectory];
-    });
+    [self tryAutoLoadFromModelsDirectory];
 }
 
 - (void)tryAutoLoadFromModelsDirectory {
@@ -2585,11 +2583,15 @@ static BOOL paramIsBool(AUParameterAddress address) {
                         [self->_activeModelURL stopAccessingSecurityScopedResource];
                         self->_activeModelURL = nil;
                     }
+                });
 
+                dispatch_async(MRT2BootstrapQueue(), ^{
                     BOOL access = [url startAccessingSecurityScopedResource];
-                    if (access) {
-                        self->_activeModelURL = url;
-                    }
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (access) {
+                            self->_activeModelURL = url;
+                        }
+                    });
 
                     NSString* path = url.path;
                     BOOL isDir = NO;
@@ -2624,12 +2626,14 @@ static BOOL paramIsBool(AUParameterAddress address) {
                                          includingResourceValuesForKeys:nil
                                                           relativeToURL:nil
                                                                   error:&bmErr];
-                        if (bookmark) {
-                            m_au.modelBookmark = bookmark;
-                            [[NSUserDefaults standardUserDefaults] setObject:bookmark forKey:@"LoadedModelBookmark"];
-                        } else {
-                            NSLog(@"MagentaRT_AU: Failed to create bookmark: %@", bmErr);
-                        }
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            if (bookmark) {
+                                m_au.modelBookmark = bookmark;
+                                [[NSUserDefaults standardUserDefaults] setObject:bookmark forKey:@"LoadedModelBookmark"];
+                            } else {
+                                NSLog(@"MagentaRT_AU: Failed to create bookmark: %@", bmErr);
+                            }
+                        });
                     }
                 });
             }
@@ -2894,7 +2898,7 @@ static BOOL paramIsBool(AUParameterAddress address) {
 }
 
 - (void)handleSelectModel:(NSString*)modelName {
-    dispatch_async(dispatch_get_main_queue(), ^{
+    dispatch_async(MRT2BootstrapQueue(), ^{
         if (!self->_audioUnit) return;
         if (![(MagentaRTAudioUnit*)self->_audioUnit engine]) return;
 
@@ -2907,13 +2911,17 @@ static BOOL paramIsBool(AUParameterAddress address) {
 
         if (!mlxfnPath) {
             [self writeDiskLog:[NSString stringWithFormat:@"selectModel: no .mlxfn for '%@' in %@", modelName, modelsDir.path]];
-            [self sendStateUpdate:@{@"modelName": @"No .mlxfn found"}];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self sendStateUpdate:@{@"modelName": @"No .mlxfn found"}];
+            });
             if (accessGranted && scopedBase) [scopedBase stopAccessingSecurityScopedResource];
             return;
         }
 
         if ([self loadModelAtPath:mlxfnPath]) {
-            [self saveLoadedModelBookmarkForURL:modelURL modelName:modelName];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self saveLoadedModelBookmarkForURL:modelURL modelName:modelName];
+            });
         }
 
         if (accessGranted && scopedBase) {
@@ -2965,31 +2973,39 @@ static BOOL paramIsBool(AUParameterAddress address) {
                     MagentaRTAudioUnit* au = (MagentaRTAudioUnit*)self->_audioUnit;
                     [[NSUserDefaults standardUserDefaults] setObject:resourcesPathToLoad
                                                               forKey:@"MagentaRT_CustomResourcesPath"];
-                    [au ensureAssetsInitialized];
                 }
 
-                MGRTEnsureCustomResourcesPath();
-                MagentaRTAudioUnit* au = (MagentaRTAudioUnit*)self->_audioUnit;
-                [self sendStateUpdate:@{
-                    @"downloadPath": selectedPath,
-                    @"resourcesMissing": @(!MGRTSharedResourcesAvailable(au))
-                }];
-                [self handleListLocalModels];
+                dispatch_async(MRT2BootstrapQueue(), ^{
+                    MagentaRTAudioUnit* au = (MagentaRTAudioUnit*)self->_audioUnit;
+                    if (au) {
+                        [au ensureAssetsInitialized];
+                    }
 
-                BOOL accessGranted = NO;
-                NSURL* scopedBase = nil;
-                NSURL* modelsDir = MGRTResolveModelsDirectory(&accessGranted, &scopedBase);
-                NSArray<NSString *> *modelFiles = [MagentaModelManager listLocalModelsInDirectory:modelsDir];
-                if (accessGranted && scopedBase) {
-                    [scopedBase stopAccessingSecurityScopedResource];
-                }
-                NSString* preferred = MGRTPreferredModelName(modelFiles);
-                if (preferred) {
-                    [self handleSelectModel:preferred];
-                } else {
-                    [self writeDiskLog:[NSString stringWithFormat:@"No models found under %@ (effective: %@)",
-                                        selectedPath, modelsDir.path]];
-                }
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        MGRTEnsureCustomResourcesPath();
+                        MagentaRTAudioUnit* auMain = (MagentaRTAudioUnit*)self->_audioUnit;
+                        [self sendStateUpdate:@{
+                            @"downloadPath": selectedPath,
+                            @"resourcesMissing": @(!MGRTSharedResourcesAvailable(auMain))
+                        }];
+                        [self handleListLocalModels];
+
+                        BOOL accessGranted = NO;
+                        NSURL* scopedBase = nil;
+                        NSURL* modelsDir = MGRTResolveModelsDirectory(&accessGranted, &scopedBase);
+                        NSArray<NSString *> *modelFiles = [MagentaModelManager listLocalModelsInDirectory:modelsDir];
+                        if (accessGranted && scopedBase) {
+                            [scopedBase stopAccessingSecurityScopedResource];
+                        }
+                        NSString* preferred = MGRTPreferredModelName(modelFiles);
+                        if (preferred) {
+                            [self handleSelectModel:preferred];
+                        } else {
+                            [self writeDiskLog:[NSString stringWithFormat:@"No models found under %@ (effective: %@)",
+                                                selectedPath, modelsDir.path]];
+                        }
+                    });
+                });
             });
         } else if (error) {
             [self addDebugLog:[NSString stringWithFormat:@"Failed to create folder bookmark: %@", error.localizedDescription]];

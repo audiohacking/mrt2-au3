@@ -7,7 +7,7 @@
     <key>CFBundleExecutable</key>
     <string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
     <key>CFBundleIdentifier</key>
-    <string>com.google.mrt2.au</string>
+    <string>com.audiohacking.mrt2.au</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
@@ -38,9 +38,9 @@
                     <key>subtype</key>
                     <string>MGR2</string>
                     <key>manufacturer</key>
-                    <string>Goog</string>
+                    <string>AHck</string>
                     <key>name</key>
-                    <string>Google: MRT2</string>
+                    <string>AudioHacking: MRT2</string>
                     <key>description</key>
                     <string>Real-time music generation</string>
                     <key>factoryFunction</key>

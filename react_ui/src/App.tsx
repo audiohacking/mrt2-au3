@@ -1170,14 +1170,12 @@ export default function App() {
                 </>
               )}
               {isAUv3 && (
-                <div style={{ marginTop: 'auto' }}>
-                  <ForkMagentaToggle
-                    label="FX Mode"
-                    checked={params.fxmode}
-                    onChange={(v) => sendParamChange(49, v ? 1 : 0)}
-                    tooltip="Use a sidechain reference from another track instead of MIDI. Route reference audio via Logic's Side Chain menu on this track."
-                  />
-                </div>
+                <ForkMagentaToggle
+                  label="FX Mode"
+                  checked={params.fxmode}
+                  onChange={(v) => sendParamChange(49, v ? 1 : 0)}
+                  tooltip="Use a sidechain reference from another track instead of MIDI. Route reference audio via Logic's Side Chain menu on this track."
+                />
               )}
             </div>
 

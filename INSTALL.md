@@ -28,8 +28,9 @@ If the plugin does not appear in your DAW, the macOS registration database might
    ```
 3. **Manually register the new path:**
    ```bash
-   pluginkit -a "/Applications/MRT2 (AU).app/Contents/PlugIns/MRT2_AU.appex"
+   pluginkit -a "$HOME/Applications/MRT2 (AU).app/Contents/PlugIns/MRT2_AU.appex"
    ```
+   After the AudioHacking rebrand, the extension id is `com.audiohacking.mrt2.au`. If an older `com.google.mrt2.au` entry remains, remove the stale `.appex` with `pluginkit -r` before re-registering.
 
 ---
 
@@ -37,7 +38,7 @@ If the plugin does not appear in your DAW, the macOS registration database might
 
 The inference engine runs in real-time and expects specific audio configuration from the host:
 
-* **AUv3 Search/Support:** Make sure your DAW is configured to scan for **Audio Unit v3 (AUv3)** plugins. The instrument should appear under **AUv3 Instruments** (or **Audio Units** -> **Google** -> **MRT2**).
+* **AUv3 Search/Support:** Make sure your DAW is configured to scan for **Audio Unit v3 (AUv3)** plugins. The instrument should appear under **AUv3 Instruments** (or **Audio Units** -> **AudioHacking** -> **MRT2**).
   * *Ableton Live Note:* You may need to go to Preferences -> Plug-ins and explicitly turn on "Use Audio Units v3" for it to scan.
 * **Sample Rate:** You **MUST** set your DAW / audio interface sample rate to **48,000 Hz (48 kHz)** before opening the plugin. Other sample rates (like 44.1 kHz) will cause playback pitch distortion or silence because the model weights are strictly trained on 48 kHz audio.
 * **Buffer Size:** For low-latency performance, set your audio buffer size as low as your system can handle (e.g., **64, 128, or 256 samples**).
