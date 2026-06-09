@@ -40,6 +40,9 @@ using magentart::core::RealtimeRunner;
 - (void)applyMergedPromptsToEngine;
 - (void)applyBpmPromptIfNeeded;
 - (double)hostTempoBpm;
+- (BOOL)hasInitializedAssets;
+/// Resolve resources on disk and call init_assets if not already loaded.
+- (BOOL)ensureAssetsInitialized;
 @end
 
 @interface MagentaRTViewController : AUViewController <AUAudioUnitFactory>

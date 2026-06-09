@@ -464,7 +464,12 @@ export default function App() {
         setIsFetchingModels(false);
       }
       if (state.downloadProgress !== undefined) setDownloadProgress(state.downloadProgress);
-      if (state.resourcesMissing !== undefined) setResourcesMissing(state.resourcesMissing);
+      if (state.resourcesMissing !== undefined) {
+        const hasLocalModels = Array.isArray(state.localModels) && state.localModels.length > 0;
+        const modelReady = !!state.modelName && state.modelName !== 'No model loaded';
+        // Native may lag one tick — don't block the UI when models are already on disk.
+        setResourcesMissing(state.resourcesMissing && !hasLocalModels && !modelReady);
+      }
       if (state.resourcesProgress !== undefined) setResourcesProgress(state.resourcesProgress);
       if (state.downloadPath !== undefined) setDownloadPath(state.downloadPath);
 
@@ -1060,10 +1065,11 @@ export default function App() {
 
           {/* ── B: Note Controls + Memory Banks ── */}
           <div style={{
-            flex: 1,
+            flexShrink: 0,
             display: 'flex',
             gap: '18px',
-            minHeight: 0,
+            alignItems: 'stretch',
+            minHeight: isFxMode ? '300px' : '248px',
           }}>
 
             {/* ── B: Note Controls (FX mode toggles sidechain reference in same panel) ── */}
@@ -1074,8 +1080,9 @@ export default function App() {
               flexDirection: 'column',
               alignItems: 'stretch',
               padding: '24px 16px',
-              gap: '14px',
-              justifyContent: isFxMode ? 'flex-start' : 'space-between',
+              gap: '12px',
+              minHeight: isFxMode ? '300px' : '248px',
+              boxSizing: 'border-box',
               position: 'relative',
             }}>
               <div style={{
@@ -1181,6 +1188,8 @@ export default function App() {
               flexDirection: 'column',
               padding: '24px 16px',
               minWidth: 0,
+              minHeight: isFxMode ? '300px' : '248px',
+              boxSizing: 'border-box',
               position: 'relative',
             }}>
               {/* Header — fieldset-legend style, out of flow */}
@@ -1201,7 +1210,7 @@ export default function App() {
               </div>
 
               {/* Banks grid */}
-              <div style={{ display: 'flex', gap: '8px', flex: 1, minHeight: 0 }}>
+              <div style={{ display: 'flex', gap: '8px', flex: 1, alignItems: 'flex-start' }}>
                 {/* Column 1: User Banks */}
                 <div className="bank-column">
                   {[0, 1, 2].map((i) => {

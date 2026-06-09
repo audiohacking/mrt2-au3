@@ -131,31 +131,61 @@ static void MGSRTSaveModelsFolderBookmark(NSString* path, NSData* bookmarkData) 
     [defaults setObject:path forKey:@"MagentaRT_ModelFolderPath"];
 }
 
-static void MGSRTClearModelsFolderBookmarks(void) {
-    NSUserDefaults* defaults = [NSUserDefaults standardUserDefaults];
-    [defaults removeObjectForKey:@"DownloadFolderBookmark"];
-    [defaults removeObjectForKey:@"DownloadFolderPath"];
-    [defaults removeObjectForKey:@"MagentaRT_ModelFolderBookmark"];
-    [defaults removeObjectForKey:@"MagentaRT_ModelFolderPath"];
+static NSURL* MGRTURLFromPath(NSString* path) {
+    return path.length > 0 ? [NSURL fileURLWithPath:path isDirectory:YES] : nil;
 }
 
-/// If `baseURL` has no models directly, try a `models/` child (e.g. user picked magenta-rt-v2 root).
+static NSArray<NSURL*>* MGRTModelsSearchCandidates(NSURL* baseURL) {
+    NSMutableOrderedSet<NSURL*>* candidates = [NSMutableOrderedSet orderedSet];
+    void (^addPath)(NSString*) = ^(NSString* path) {
+        NSURL* url = MGRTURLFromPath(path);
+        if (url) [candidates addObject:url];
+    };
+
+    if (baseURL) {
+        [candidates addObject:baseURL];
+        addPath([baseURL.path stringByAppendingPathComponent:@"models"]);
+        addPath([baseURL.path stringByAppendingPathComponent:@"magenta-rt-v2/models"]);
+    }
+
+    for (NSString* path in [MagentaModelManager defaultModelsSearchPaths]) {
+        addPath(path);
+        addPath([path stringByAppendingPathComponent:@"models"]);
+        addPath([path stringByAppendingPathComponent:@"magenta-rt-v2/models"]);
+    }
+
+    return candidates.array;
+}
+
+/// Resolve the first directory under `baseURL` (or standard Magenta layouts) that contains models.
 static NSURL* MGRTEffectiveModelsDirectoryURL(NSURL* baseURL) {
-    if (!baseURL) return nil;
-
-    NSArray<NSString*>* direct = [MagentaModelManager listLocalModelsInDirectory:baseURL];
-    if (direct.count > 0) return baseURL;
-
-    NSURL* modelsSub = [baseURL URLByAppendingPathComponent:@"models" isDirectory:YES];
-    BOOL isDir = NO;
-    if ([[NSFileManager defaultManager] fileExistsAtPath:modelsSub.path isDirectory:&isDir] && isDir) {
-        NSArray<NSString*>* nested = [MagentaModelManager listLocalModelsInDirectory:modelsSub];
-        if (nested.count > 0) {
-            NSLog(@"MagentaRT_AU: using models/ subdirectory under %@", baseURL.path);
-            return modelsSub;
+    for (NSURL* candidate in MGRTModelsSearchCandidates(baseURL)) {
+        NSArray<NSString*>* models = [MagentaModelManager listLocalModelsInDirectory:candidate];
+        if (models.count > 0) {
+            if (baseURL && ![candidate.path isEqualToString:baseURL.path]) {
+                NSLog(@"MagentaRT_AU: using models directory %@", candidate.path);
+            }
+            return candidate;
         }
     }
-    return baseURL;
+    if (baseURL) return baseURL;
+    return MGRTURLFromPath([MagentaModelManager defaultModelsDirectory]);
+}
+
+static NSString* MGRTResolveResourcesPath(void) {
+    for (NSString* path in [MagentaModelDownloader defaultResourceSearchPaths]) {
+        if ([MagentaModelDownloader resourcesValidAtPath:path]) {
+            return path;
+        }
+    }
+    return [NSString stringWithUTF8String:magentart::paths::get_resources_dir().c_str()];
+}
+
+static BOOL MGRTSharedResourcesAvailable(MagentaRTAudioUnit* au) {
+    if ([MagentaModelDownloader areSharedResourcesValid]) {
+        return YES;
+    }
+    return au && [au hasInitializedAssets];
 }
 
 static NSURL* MGRTResolveModelsDirectory(BOOL* outAccessGranted, NSURL** outScopedBaseURL) {
@@ -192,35 +222,40 @@ static NSURL* MGRTResolveModelsDirectory(BOOL* outAccessGranted, NSURL** outScop
         baseURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:defaultPath.c_str()]];
     }
 
-    NSURL* effectiveURL = MGRTEffectiveModelsDirectoryURL(baseURL);
-    if (bookmark && baseURL) {
-        NSArray<NSString*>* listed = [MagentaModelManager listLocalModelsInDirectory:effectiveURL];
-        if (listed.count == 0) {
-            NSLog(@"MagentaRT_AU: bookmarked models folder is empty at %@ — clearing stale bookmark", effectiveURL.path);
-            if (outAccessGranted && *outAccessGranted && outScopedBaseURL && *outScopedBaseURL) {
-                [*outScopedBaseURL stopAccessingSecurityScopedResource];
-                if (outAccessGranted) *outAccessGranted = NO;
-                if (outScopedBaseURL) *outScopedBaseURL = nil;
-            }
-            MGSRTClearModelsFolderBookmarks();
-            std::string defaultPath = magentart::paths::get_models_dir();
-            baseURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:defaultPath.c_str()]];
-            effectiveURL = MGRTEffectiveModelsDirectoryURL(baseURL);
-        }
-    }
+    return MGRTEffectiveModelsDirectoryURL(baseURL);
+}
 
-    return effectiveURL;
+static void MGRTEnsureCustomResourcesPath(void) {
+    NSString* current = [[NSUserDefaults standardUserDefaults] objectForKey:@"MagentaRT_CustomResourcesPath"];
+    if (current.length > 0 && [MagentaModelDownloader resourcesValidAtPath:current]) {
+        return;
+    }
+    if (current.length > 0) {
+        [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"MagentaRT_CustomResourcesPath"];
+    }
+    NSString* resolved = MGRTResolveResourcesPath();
+    if ([MagentaModelDownloader resourcesValidAtPath:resolved]) {
+        [[NSUserDefaults standardUserDefaults] setObject:resolved forKey:@"MagentaRT_CustomResourcesPath"];
+        NSLog(@"MagentaRT_AU: using resources at %@", resolved);
+    }
 }
 
 static NSString* MGRTSandboxAwareResourcesPath(NSString* selectedPath) {
-    NSString* customResourcesPath = [selectedPath stringByAppendingPathComponent:@"resources"];
-    if ([[NSFileManager defaultManager] fileExistsAtPath:customResourcesPath]) {
-        return customResourcesPath;
+    if (selectedPath.length == 0) {
+        return MGRTResolveResourcesPath();
     }
-    NSString* home = NSHomeDirectory();
-    NSRange range = [home rangeOfString:@"/Library/Containers/"];
-    NSString* realHome = (range.location != NSNotFound) ? [home substringToIndex:range.location] : home;
-    return [realHome stringByAppendingPathComponent:@"Documents/Magenta/magenta-rt-v2/resources"];
+
+    NSArray<NSString*>* candidates = @[
+        selectedPath,
+        [selectedPath stringByAppendingPathComponent:@"resources"],
+        [selectedPath stringByAppendingPathComponent:@"magenta-rt-v2/resources"],
+    ];
+    for (NSString* candidate in candidates) {
+        if ([MagentaModelDownloader resourcesValidAtPath:candidate]) {
+            return candidate;
+        }
+    }
+    return MGRTResolveResourcesPath();
 }
 
 static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
@@ -601,19 +636,12 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
                                                              busses:@[_dummyInputBus, _sidechainBus]];
 #endif
 
-    // Load tokenizer and models externally from custom path or ~/Documents/Magenta/resources/ to keep bundle size tiny
-    NSString *customResources = [[NSUserDefaults standardUserDefaults] stringForKey:@"MagentaRT_CustomResourcesPath"];
-    std::string resourcesPath = customResources ? std::string(customResources.UTF8String) : magentart::paths::get_resources_dir();
-    _modelLoaded = _engine.init_assets(resourcesPath.c_str());
-    if (_modelLoaded) {
-      self.musicCocaModelName = @"musiccoca";
-      _engine.load_musiccoca_model(resourcesPath.c_str(), "musiccoca");
-    } else {
-        NSLog(@"MagentaRT_AU: Failed to load static assets externally from: %s", resourcesPath.c_str());
+    // Assets are finalized in ensureAssetsInitialized (also retried from connectToAU / loadModelAtPath).
+    if (![self ensureAssetsInitialized]) {
         if (!self.logHistory) {
             self.logHistory = [NSMutableArray array];
         }
-        [self.logHistory addObject:[NSString stringWithFormat:@"init_assets FAILED: %s", resourcesPath.c_str()]];
+        [self.logHistory addObject:@"init_assets deferred — will retry when UI connects"];
     }
 
     self.maximumFramesToRender = 4096;
@@ -676,6 +704,41 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
 
 - (BOOL)isFxMode {
     return _fxMode.load(std::memory_order_relaxed);
+}
+
+- (BOOL)hasInitializedAssets {
+    return _modelLoaded;
+}
+
+- (BOOL)ensureAssetsInitialized {
+    MGRTEnsureCustomResourcesPath();
+
+    NSString* resourcesPath = [[NSUserDefaults standardUserDefaults] stringForKey:@"MagentaRT_CustomResourcesPath"];
+    if (resourcesPath.length == 0 || ![MagentaModelDownloader resourcesValidAtPath:resourcesPath]) {
+        resourcesPath = MGRTResolveResourcesPath();
+    }
+    if (resourcesPath.length == 0 || ![MagentaModelDownloader resourcesValidAtPath:resourcesPath]) {
+        return NO;
+    }
+
+    if (_modelLoaded) {
+        return YES;
+    }
+
+    _modelLoaded = _engine.init_assets(resourcesPath.UTF8String);
+    if (_modelLoaded) {
+        [[NSUserDefaults standardUserDefaults] setObject:resourcesPath forKey:@"MagentaRT_CustomResourcesPath"];
+        self.musicCocaModelName = @"musiccoca";
+        _engine.load_musiccoca_model(resourcesPath.UTF8String, "musiccoca");
+        NSLog(@"MagentaRT_AU: ensureAssetsInitialized OK at %@", resourcesPath);
+    } else {
+        NSLog(@"MagentaRT_AU: ensureAssetsInitialized FAILED at %@", resourcesPath);
+        if (!self.logHistory) {
+            self.logHistory = [NSMutableArray array];
+        }
+        [self.logHistory addObject:[NSString stringWithFormat:@"init_assets FAILED: %@", resourcesPath]];
+    }
+    return _modelLoaded;
 }
 
 static size_t FxReferenceWindowSamples(AUValue windowIndex) {
@@ -895,6 +958,11 @@ static size_t FxReferenceWindowSamples(AUValue windowIndex) {
                 } else {
                 // Perform async load so we don't block AU initialization
                 dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                    if (![self ensureAssetsInitialized]) {
+                        NSLog(@"MagentaRT_AU: applyCustomState model load skipped — assets not ready");
+                        [url stopAccessingSecurityScopedResource];
+                        return;
+                    }
                     BOOL success = self->_engine.load_model(mlxfnPath.UTF8String);
                     if (success) {
                         if (self.prompts) {
@@ -1790,6 +1858,8 @@ static BOOL paramIsBool(AUParameterAddress address) {
     AUAudioUnit* au = _audioUnit;
     if (!au) return;
 
+    MagentaRTAudioUnit* mrtAu = [au isKindOfClass:[MagentaRTAudioUnit class]] ? (MagentaRTAudioUnit*)au : nil;
+
     NSMutableDictionary* initialParams = [NSMutableDictionary dictionary];
     for (int i = 0; i <= 52; i++) {
         // Skip weight params — prompts carry their own weights via textPrompts.
@@ -1808,26 +1878,24 @@ static BOOL paramIsBool(AUParameterAddress address) {
     NSMutableDictionary* stateUpdate = [NSMutableDictionary dictionary];
     stateUpdate[@"params"] = initialParams;
 
-    if ([au isKindOfClass:[MagentaRTAudioUnit class]]) {
-        MagentaRTAudioUnit* m_au = (MagentaRTAudioUnit*)au;
-
+    if (mrtAu) {
         __weak MagentaRTViewController* weakVC = self;
 #if MAGENTART_DEBUG_LOG
-        m_au.debugLogHandler = ^(NSString* msg) {
+        mrtAu.debugLogHandler = ^(NSString* msg) {
             [weakVC sendStateUpdate:@{@"debugLog": msg}];
         };
 #endif
 
         // Replay log history
-        if (m_au.logHistory.count > 0) {
-            for (NSString* msg in m_au.logHistory) {
+        if (mrtAu.logHistory.count > 0) {
+            for (NSString* msg in mrtAu.logHistory) {
                 [weakVC sendStateUpdate:@{@"debugLog": msg}];
             }
         }
 
-        if (m_au.prompts) stateUpdate[@"textPrompts"] = m_au.prompts;
-        if (m_au.modelName) stateUpdate[@"modelName"] = m_au.modelName;
-        if (m_au.promptSurfaceState) stateUpdate[@"prompt_surface"] = m_au.promptSurfaceState;
+        if (mrtAu.prompts) stateUpdate[@"textPrompts"] = mrtAu.prompts;
+        if (mrtAu.modelName) stateUpdate[@"modelName"] = mrtAu.modelName;
+        if (mrtAu.promptSurfaceState) stateUpdate[@"prompt_surface"] = mrtAu.promptSurfaceState;
 
         // Push bank existence status
         NSFileManager* fm = [NSFileManager defaultManager];
@@ -1837,7 +1905,7 @@ static BOOL paramIsBool(AUParameterAddress address) {
             @([fm fileExistsAtPath:bankFilePathAU(2)]),
         ];
 
-        RealtimeRunner* engine = [m_au engine];
+        RealtimeRunner* engine = [mrtAu engine];
         if (engine) {
             if (engine->get_recorded_sample_count() > 0) {
                 std::vector<float> peaks = engine->get_waveform_peaks(200);
@@ -1862,7 +1930,11 @@ static BOOL paramIsBool(AUParameterAddress address) {
     }
     stateUpdate[@"downloadPath"] = savedPath;
 
-    stateUpdate[@"resourcesMissing"] = @(![MagentaModelDownloader areSharedResourcesValid]);
+    MGRTEnsureCustomResourcesPath();
+    if (mrtAu) {
+        [mrtAu ensureAssetsInitialized];
+    }
+    stateUpdate[@"resourcesMissing"] = @(!MGRTSharedResourcesAvailable(mrtAu));
 
     [self sendStateUpdate:stateUpdate];
     [self handleListLocalModels];
@@ -1916,6 +1988,15 @@ static BOOL paramIsBool(AUParameterAddress address) {
                 AUParameter* param = [_audioUnit.parameterTree parameterWithAddress:indexValue.unsignedIntValue];
                 if (param) {
                     [param setValue:paramValue.floatValue originator:nil];
+                    // Belt-and-suspenders: ensure engine sees drumless even if the
+                    // parameter observer path is bypassed during async model load.
+                    if (indexValue.unsignedIntValue == 39 &&
+                        [_audioUnit isKindOfClass:[MagentaRTAudioUnit class]]) {
+                        RealtimeRunner* engine = [(MagentaRTAudioUnit*)_audioUnit engine];
+                        if (engine) {
+                            engine->set_drumless(paramValue.floatValue > 0.5f);
+                        }
+                    }
                 }
             }
         }
@@ -2282,10 +2363,16 @@ static BOOL paramIsBool(AUParameterAddress address) {
                                                      error:&error];
             if (url && [url startAccessingSecurityScopedResource]) {
                 NSString* mlxfnPath = [self mlxfnPathForModelAtURL:url];
-                if (mlxfnPath && [self loadModelAtPath:mlxfnPath]) {
+                BOOL loaded = mlxfnPath && [self loadModelAtPath:mlxfnPath];
+                if (loaded) {
                     dispatch_async(dispatch_get_main_queue(), ^{
                         [self saveLoadedModelBookmarkForURL:url
                                                   modelName:m_au.modelName ?: mlxfnPath.lastPathComponent];
+                    });
+                } else {
+                    [self writeDiskLog:@"connectToAU: AU model bookmark load failed, scanning default paths"];
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [self tryAutoLoadFromModelsDirectory];
                     });
                 }
                 [url stopAccessingSecurityScopedResource];
@@ -2312,11 +2399,17 @@ static BOOL paramIsBool(AUParameterAddress address) {
                                                      error:&error];
             if (url && [url startAccessingSecurityScopedResource]) {
                 NSString* mlxfnPath = [self mlxfnPathForModelAtURL:url];
-                if (mlxfnPath && [self loadModelAtPath:mlxfnPath]) {
+                BOOL loaded = mlxfnPath && [self loadModelAtPath:mlxfnPath];
+                if (loaded) {
                     NSString* savedModelName = [[NSUserDefaults standardUserDefaults] stringForKey:@"LoadedModelName"];
                     dispatch_async(dispatch_get_main_queue(), ^{
                         [self saveLoadedModelBookmarkForURL:url
                                                   modelName:savedModelName ?: mlxfnPath.lastPathComponent];
+                    });
+                } else {
+                    [self writeDiskLog:@"connectToAU: saved model bookmark load failed, scanning default paths"];
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [self tryAutoLoadFromModelsDirectory];
                     });
                 }
                 [url stopAccessingSecurityScopedResource];
@@ -2341,13 +2434,15 @@ static BOOL paramIsBool(AUParameterAddress address) {
     RealtimeRunner* engine = [m_au engine];
     if (!engine || engine->is_loaded()) return;
 
+    MGRTEnsureCustomResourcesPath();
+
     BOOL accessGranted = NO;
     NSURL* scopedBase = nil;
     NSURL* modelsDir = MGRTResolveModelsDirectory(&accessGranted, &scopedBase);
     NSArray<NSString*>* modelFiles = [MagentaModelManager listLocalModelsInDirectory:modelsDir];
     if (modelFiles.count == 0) {
         if (accessGranted && scopedBase) [scopedBase stopAccessingSecurityScopedResource];
-        [self writeDiskLog:@"tryAutoLoad: No models in folder; use UI onboarding to select a model."];
+        [self writeDiskLog:[NSString stringWithFormat:@"tryAutoLoad: No models found (searched %@)", modelsDir.path]];
         return;
     }
 
@@ -2380,6 +2475,11 @@ static BOOL paramIsBool(AUParameterAddress address) {
     RealtimeRunner* engine = [au engine];
     if (!engine) return NO;
 
+    if (![au ensureAssetsInitialized]) {
+        [self writeDiskLog:@"loadModelAtPath: shared assets not initialized"];
+        return NO;
+    }
+
     NSFileManager* fm = [NSFileManager defaultManager];
     BOOL mlxfnExists = [fm fileExistsAtPath:mlxfnPath];
     NSString* statePath = [mlxfnPath stringByReplacingOccurrencesOfString:@".mlxfn" withString:@"_state.safetensors"];
@@ -2391,7 +2491,9 @@ static BOOL paramIsBool(AUParameterAddress address) {
                         stateExists ? @"yes" : @"NO",
                         assetsStatus]];
 
-    engine->set_drumless(false);
+    // Preserve drumless across async auto-load — user may toggle before load finishes.
+    AUParameter* drumlessParam = [au.parameterTree parameterWithAddress:39];
+    const BOOL preserveDrumless = drumlessParam ? (drumlessParam.value > 0.5f) : engine->get_drumless();
 
     NSLog(@"MagentaRT_AU: Attempting to load model from path: %@", mlxfnPath);
     BOOL success = engine->load_model(mlxfnPath.UTF8String);
@@ -2402,7 +2504,8 @@ static BOOL paramIsBool(AUParameterAddress address) {
         self->_modelDirectoryURL = [NSURL fileURLWithPath:[mlxfnPath stringByDeletingLastPathComponent]];
 
         NSMutableDictionary* stateUpdate = [NSMutableDictionary dictionaryWithDictionary:@{
-            @"modelName": mlxfnPath.lastPathComponent
+            @"modelName": mlxfnPath.lastPathComponent,
+            @"resourcesMissing": @NO,
         }];
 
         // Load MusicCoCa model if not already loaded
@@ -2421,7 +2524,9 @@ static BOOL paramIsBool(AUParameterAddress address) {
             stateUpdate[@"musicCocaModelName"] = @"musiccoca";
         }
 
-        stateUpdate[@"params"] = @{@"drumless": @NO};
+        engine->set_drumless(preserveDrumless);
+        stateUpdate[@"params"] = @{@"drumless": @(preserveDrumless)};
+        _lastParams[@"drumless"] = @(preserveDrumless);
 
         // Load SpectroStream encoder: model dir → external spectrostream → bundle
         NSString* parentDir = [mlxfnPath stringByDeletingLastPathComponent];
@@ -2780,7 +2885,11 @@ static BOOL paramIsBool(AUParameterAddress address) {
         [scopedBase stopAccessingSecurityScopedResource];
     }
 
-    [self sendStateUpdate:@{@"localModels": modelFiles}];
+    NSMutableDictionary* update = [NSMutableDictionary dictionaryWithObject:modelFiles forKey:@"localModels"];
+    if (modelFiles.count > 0 && MGRTSharedResourcesAvailable((MagentaRTAudioUnit*)self->_audioUnit)) {
+        update[@"resourcesMissing"] = @NO;
+    }
+    [self sendStateUpdate:update];
 }
 
 - (void)handleSelectModel:(NSString*)modelName {
@@ -2853,20 +2962,16 @@ static BOOL paramIsBool(AUParameterAddress address) {
 
                 if (self->_audioUnit) {
                     MagentaRTAudioUnit* au = (MagentaRTAudioUnit*)self->_audioUnit;
-                    RealtimeRunner* engine = [au engine];
-                    if (engine) {
-                        if (!engine->init_assets(resourcesPathToLoad.UTF8String)) {
-                            NSLog(@"MagentaRT_AU: Failed to initialize assets from path: %@", resourcesPathToLoad);
-                        } else {
-                            NSLog(@"MagentaRT_AU: Successfully initialized assets from path: %@", resourcesPathToLoad);
-                            [[NSUserDefaults standardUserDefaults] setObject:resourcesPathToLoad forKey:@"MagentaRT_CustomResourcesPath"];
-                        }
-                    }
+                    [[NSUserDefaults standardUserDefaults] setObject:resourcesPathToLoad
+                                                              forKey:@"MagentaRT_CustomResourcesPath"];
+                    [au ensureAssetsInitialized];
                 }
 
+                MGRTEnsureCustomResourcesPath();
+                MagentaRTAudioUnit* au = (MagentaRTAudioUnit*)self->_audioUnit;
                 [self sendStateUpdate:@{
                     @"downloadPath": selectedPath,
-                    @"resourcesMissing": @(![MagentaModelDownloader areSharedResourcesValid])
+                    @"resourcesMissing": @(!MGRTSharedResourcesAvailable(au))
                 }];
                 [self handleListLocalModels];
 
