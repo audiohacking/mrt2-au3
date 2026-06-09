@@ -4,12 +4,12 @@ Portable guide for fixing **repeated folder-picker prompts**, **false “resourc
 
 Applies to forks that use:
 
-- `magenta-realtime/examples/common/objc/MagentaModelManager.{h,mm}`
-- `magenta-realtime/examples/common/objc/MagentaModelDownloader.{h,mm}`
+- **Fork-owned** `MRT2ModelPaths.{h,mm}` and `MagentaRT_AudioUnit.mm` (do **not** patch `magenta-realtime`)
+- Upstream `magenta-realtime/examples/common/objc/MagentaModelManager.{h,mm}` and `MagentaModelDownloader.{h,mm}` unchanged
 - `magenta-realtime/examples/common/cpp/magenta_paths.{h,cpp}`
 - React UI with `ResourceOnboardingModal` + `ModelSelector` (`@magenta-rt/common`)
 
-Reference implementation: **mrt2-au3** (`MagentaRT_AudioUnit.mm`, commits on `feature/bpm-sync`).
+Reference implementation: **mrt2-au3** (`MRT2ModelPaths.mm`, `MagentaRT_AudioUnit.mm`).
 
 ---
 
@@ -66,13 +66,13 @@ See `Entitlements.plist` in this repo.
 
 Old `areSharedResourcesValid` used glob patterns like `musiccoca*/*.tflite`. These fail silently in the sandbox or with slightly different directory layouts.
 
-**Fix:** `resourcesValidAtPath:` — explicit `NSFileManager` checks for `musiccoca/*.tflite` and `spectrostream/*.mlxfn`.
+**Fix:** `MRT2ModelPaths resourcesValidAtPath:` — explicit `NSFileManager` checks for `musiccoca/*.tflite` and `spectrostream/*.mlxfn` (fork code; upstream glob unchanged).
 
 ### 2. Single-path model resolution
 
 Old code only listed models in the exact bookmarked folder. If the user picked `~/Documents/Magenta`, listing returned empty (models live in `magenta-rt-v2/models/`).
 
-**Fix:** `MGRTModelsSearchCandidates` / `defaultModelsSearchPaths` — try, in order:
+**Fix:** `MGRTModelsSearchCandidates` / `MRT2ModelPaths defaultModelsSearchPaths` — try, in order:
 
 - Bookmarked / saved path
 - `{path}/models`
@@ -122,20 +122,16 @@ First paint can show onboarding or “Select model…” until the background lo
 
 ## Files to change (checklist)
 
-### Shared (`magenta-realtime/examples/common/objc/`)
+### Fork-owned (`mrt2-au3` root — do not modify `magenta-realtime`)
 
-#### `MagentaModelDownloader.h` / `.mm`
+#### `MRT2ModelPaths.h` / `.mm`
 
 - [ ] `+defaultResourceSearchPaths` — ordered candidate resource dirs
 - [ ] `+resourcesValidAtPath:` — FileManager-based validation
-- [ ] `+areSharedResourcesValid` — scan all candidates (replace glob)
-
-#### `MagentaModelManager.h` / `.mm`
-
+- [ ] `+sharedResourcesAvailableOnDisk` — scan all candidates
 - [ ] `+defaultModelsSearchPaths` — ordered candidate model dirs
-- [ ] Keep `+defaultModelsDirectory` using `NSHomeDirectoryForUser`
 
-### Plugin view controller (e.g. `MagentaRT_AudioUnit.mm`)
+### Plugin view controller (`MagentaRT_AudioUnit.mm`)
 
 - [ ] `MGRTModelsSearchCandidates` / `MGRTEffectiveModelsDirectoryURL`
 - [ ] `MGRTResolveModelsDirectory` — bookmark + fallback, **no bookmark clearing**
@@ -200,8 +196,8 @@ Manual folder pick (`selectDownloadFolder`) is still required for custom locatio
 
 ## Porting to another plugin
 
-1. Copy or merge changes from **mrt2-au3** into the plugin’s view-controller `.mm` (search for `MGRT` helpers).
-2. Update **shared** `MagentaModelDownloader` / `MagentaModelManager` in the submodule (or vendor copies).
+1. Copy `MRT2ModelPaths.{h,mm}` and merge `MGRT*` helpers from **mrt2-au3** `MagentaRT_AudioUnit.mm`.
+2. Keep `magenta-realtime` submodule on upstream `main`; bump with `git submodule update --remote`.
 3. Apply the **App.tsx** onboarding gate if the plugin uses the same React shell.
 4. Verify **Entitlements.plist** is signed into the `.appex` (`cmake --build …` + `codesign -d --entitlements -`).
 5. Test matrix:

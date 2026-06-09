@@ -17,6 +17,7 @@
 // FX mode: sidechain reference input (parallel routing), generated output only.
 
 #import "MagentaRT_AudioUnit.h"
+#import "MRT2ModelPaths.h"
 #import <AVFoundation/AVFoundation.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import "MagentaModelManager.h"
@@ -148,7 +149,7 @@ static NSArray<NSURL*>* MGRTModelsSearchCandidates(NSURL* baseURL) {
         addPath([baseURL.path stringByAppendingPathComponent:@"magenta-rt-v2/models"]);
     }
 
-    for (NSString* path in [MagentaModelManager defaultModelsSearchPaths]) {
+    for (NSString* path in [MRT2ModelPaths defaultModelsSearchPaths]) {
         addPath(path);
         addPath([path stringByAppendingPathComponent:@"models"]);
         addPath([path stringByAppendingPathComponent:@"magenta-rt-v2/models"]);
@@ -173,8 +174,8 @@ static NSURL* MGRTEffectiveModelsDirectoryURL(NSURL* baseURL) {
 }
 
 static NSString* MGRTResolveResourcesPath(void) {
-    for (NSString* path in [MagentaModelDownloader defaultResourceSearchPaths]) {
-        if ([MagentaModelDownloader resourcesValidAtPath:path]) {
+    for (NSString* path in [MRT2ModelPaths defaultResourceSearchPaths]) {
+        if ([MRT2ModelPaths resourcesValidAtPath:path]) {
             return path;
         }
     }
@@ -182,7 +183,7 @@ static NSString* MGRTResolveResourcesPath(void) {
 }
 
 static BOOL MGRTSharedResourcesAvailable(MagentaRTAudioUnit* au) {
-    if ([MagentaModelDownloader areSharedResourcesValid]) {
+    if ([MRT2ModelPaths sharedResourcesAvailableOnDisk]) {
         return YES;
     }
     return au && [au hasInitializedAssets];
@@ -227,14 +228,14 @@ static NSURL* MGRTResolveModelsDirectory(BOOL* outAccessGranted, NSURL** outScop
 
 static void MGRTEnsureCustomResourcesPath(void) {
     NSString* current = [[NSUserDefaults standardUserDefaults] objectForKey:@"MagentaRT_CustomResourcesPath"];
-    if (current.length > 0 && [MagentaModelDownloader resourcesValidAtPath:current]) {
+    if (current.length > 0 && [MRT2ModelPaths resourcesValidAtPath:current]) {
         return;
     }
     if (current.length > 0) {
         [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"MagentaRT_CustomResourcesPath"];
     }
     NSString* resolved = MGRTResolveResourcesPath();
-    if ([MagentaModelDownloader resourcesValidAtPath:resolved]) {
+    if ([MRT2ModelPaths resourcesValidAtPath:resolved]) {
         [[NSUserDefaults standardUserDefaults] setObject:resolved forKey:@"MagentaRT_CustomResourcesPath"];
         NSLog(@"MagentaRT_AU: using resources at %@", resolved);
     }
@@ -251,7 +252,7 @@ static NSString* MGRTSandboxAwareResourcesPath(NSString* selectedPath) {
         [selectedPath stringByAppendingPathComponent:@"magenta-rt-v2/resources"],
     ];
     for (NSString* candidate in candidates) {
-        if ([MagentaModelDownloader resourcesValidAtPath:candidate]) {
+        if ([MRT2ModelPaths resourcesValidAtPath:candidate]) {
             return candidate;
         }
     }
@@ -714,10 +715,10 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
     MGRTEnsureCustomResourcesPath();
 
     NSString* resourcesPath = [[NSUserDefaults standardUserDefaults] stringForKey:@"MagentaRT_CustomResourcesPath"];
-    if (resourcesPath.length == 0 || ![MagentaModelDownloader resourcesValidAtPath:resourcesPath]) {
+    if (resourcesPath.length == 0 || ![MRT2ModelPaths resourcesValidAtPath:resourcesPath]) {
         resourcesPath = MGRTResolveResourcesPath();
     }
-    if (resourcesPath.length == 0 || ![MagentaModelDownloader resourcesValidAtPath:resourcesPath]) {
+    if (resourcesPath.length == 0 || ![MRT2ModelPaths resourcesValidAtPath:resourcesPath]) {
         return NO;
     }
 
@@ -2484,7 +2485,7 @@ static BOOL paramIsBool(AUParameterAddress address) {
     BOOL mlxfnExists = [fm fileExistsAtPath:mlxfnPath];
     NSString* statePath = [mlxfnPath stringByReplacingOccurrencesOfString:@".mlxfn" withString:@"_state.safetensors"];
     BOOL stateExists = [fm fileExistsAtPath:statePath];
-    NSString* assetsStatus = [MagentaModelDownloader areSharedResourcesValid] ? @"yes" : @"NO";
+    NSString* assetsStatus = [MRT2ModelPaths sharedResourcesAvailableOnDisk] ? @"yes" : @"NO";
     [self writeDiskLog:[NSString stringWithFormat:@"loadModelAtPath: %@ (mlxfn=%@ state=%@ resources=%@)",
                         mlxfnPath.lastPathComponent,
                         mlxfnExists ? @"yes" : @"NO",

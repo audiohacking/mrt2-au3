@@ -31,8 +31,6 @@ set(ABSL_PROPAGATE_CXX_STD ON)
 
 set(MAGENTA_RT_DIR "${CMAKE_SOURCE_DIR}/magenta-realtime")
 set(MRT2_COMMON_DIR "${MAGENTA_RT_DIR}/examples/common")
-# Fork-owned model path helpers (not committed to magenta-realtime submodule).
-set(MRT2_FORK_OBJC "${CMAKE_CURRENT_SOURCE_DIR}/common/objc")
 
 if(NOT EXISTS "${MAGENTA_RT_DIR}/core/CMakeLists.txt")
   message(FATAL_ERROR
@@ -201,9 +199,10 @@ set_source_files_properties(${APP_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION "Reso
 
 add_executable(mrt2_au MACOSX_BUNDLE
   MagentaRT_AudioUnit.mm
+  MRT2ModelPaths.mm
   ${MRT2_COMMON_DIR}/cpp/magenta_paths.cpp
-  ${MRT2_FORK_OBJC}/MagentaModelManager.mm
-  ${MRT2_FORK_OBJC}/MagentaModelDownloader.mm
+  ${MRT2_COMMON_DIR}/objc/MagentaModelManager.mm
+  ${MRT2_COMMON_DIR}/objc/MagentaModelDownloader.mm
   ${APP_ICON}
 )
 
@@ -212,7 +211,7 @@ target_link_options(mrt2_au PRIVATE -e _NSExtensionMain)
 target_include_directories(mrt2_au PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${MRT2_COMMON_DIR}/cpp
-  ${MRT2_FORK_OBJC}
+  ${MRT2_COMMON_DIR}/objc
 )
 target_compile_options(mrt2_au PRIVATE -fobjc-arc)
 target_compile_definitions(mrt2_au PRIVATE MRT2_AU_SIDECHAIN_INPUT_BUSES=1)
