@@ -25,6 +25,11 @@
 #include "audio_level_processor.h"
 #include "SidechainReferenceCapture.h"
 #include <cmath>
+#include <memory>
+
+#ifndef MRT2_AU_SIDECHAIN_INPUT_BUSES
+#define MRT2_AU_SIDECHAIN_INPUT_BUSES 0
+#endif
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
@@ -242,9 +247,11 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
     AUParameterTree* _parameterTree;
     AUAudioUnitBus* _outputBus;
     AUAudioUnitBusArray* _outputBusArray;
+#if MRT2_AU_SIDECHAIN_INPUT_BUSES
     AUAudioUnitBus* _dummyInputBus;
     AUAudioUnitBus* _sidechainBus;
     AUAudioUnitBusArray* _inputBusArray;
+#endif
     BOOL _modelLoaded;
     AudioConverterRef _resampler;
     float* _resampleBufferL;
@@ -264,7 +271,7 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
     std::atomic<bool> _midiNotes[128];
     magentart::common::AudioLevelProcessor _levelProcessor;
     magentart::common::AudioLevelProcessor _referenceLevelProcessor;
-    mrt2_au::SidechainReferenceRingBuffer _referenceRing;
+    std::unique_ptr<mrt2_au::SidechainReferenceRingBuffer> _referenceRing;
     SidechainPullBuffer _sidechainPull;
     std::atomic<bool> _fxMode;
     std::atomic<bool> _referenceEncodeInFlight;
@@ -499,9 +506,11 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
         else if (param.address == kParamAddressFxMode) {
             const bool fx = value > 0.5f;
             weakSelf->_fxMode.store(fx, std::memory_order_relaxed);
+#if MRT2_AU_SIDECHAIN_INPUT_BUSES
             weakSelf->_sidechainBus.enabled = fx;
+#endif
             if (fx) {
-                weakSelf->_referenceRing.clear();
+                if (weakSelf->_referenceRing) weakSelf->_referenceRing->clear();
                 weakSelf->_referenceEncodeTicks.store(0, std::memory_order_relaxed);
                 for (int n = 0; n < 128; ++n) {
                     weakSelf->_engine.set_note_off(static_cast<uint8_t>(n));
@@ -565,6 +574,7 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
                                                               busType:AUAudioUnitBusTypeOutput
                                                                busses:@[_outputBus]];
 
+#if MRT2_AU_SIDECHAIN_INPUT_BUSES
     // Sidechain input buses: dummy bus 0 (disabled) + sidechain bus 1 for Logic Pro routing.
     _dummyInputBus = [[AUAudioUnitBus alloc] initWithFormat:format error:&busError];
     if (busError) {
@@ -585,6 +595,7 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
     _inputBusArray = [[AUAudioUnitBusArray alloc] initWithAudioUnit:self
                                                             busType:AUAudioUnitBusTypeInput
                                                              busses:@[_dummyInputBus, _sidechainBus]];
+#endif
 
     // Load tokenizer and models externally from custom path or ~/Documents/Magenta/resources/ to keep bundle size tiny
     NSString *customResources = [[NSUserDefaults standardUserDefaults] stringForKey:@"MagentaRT_CustomResourcesPath"];
@@ -674,7 +685,8 @@ static size_t FxReferenceWindowSamples(AUValue windowIndex) {
     if (!_engine.is_loaded()) return;
     if (_referenceEncodeInFlight.load(std::memory_order_relaxed)) return;
 
-    const size_t filled = _referenceRing.filled_samples();
+    if (!_referenceRing) return;
+    const size_t filled = _referenceRing->filled_samples();
     AUParameter* windowParam = [_parameterTree parameterWithAddress:kParamAddressFxRefWindow];
     const size_t windowSamples = FxReferenceWindowSamples(windowParam ? windowParam.value : 1.0f);
     if (filled < windowSamples / 4) return; // wait for at least 25% of window
@@ -685,7 +697,7 @@ static size_t FxReferenceWindowSamples(AUValue windowIndex) {
 
     std::vector<float> stereoL(captureSamples);
     std::vector<float> stereoR(captureSamples);
-    const size_t copied = _referenceRing.read_recent(stereoL.data(), stereoR.data(), captureSamples);
+    const size_t copied = _referenceRing->read_recent(stereoL.data(), stereoR.data(), captureSamples);
     if (copied == 0) {
         _referenceEncodeInFlight.store(false, std::memory_order_relaxed);
         return;
@@ -803,9 +815,11 @@ static size_t FxReferenceWindowSamples(AUValue windowIndex) {
     return _outputBusArray;
 }
 
+#if MRT2_AU_SIDECHAIN_INPUT_BUSES
 - (AUAudioUnitBusArray*)inputBusses {
     return _inputBusArray;
 }
+#endif
 
 - (BOOL)canProcessInPlace {
     return NO;
@@ -1021,14 +1035,22 @@ static size_t FxReferenceWindowSamples(AUValue windowIndex) {
         _resampleBufferInterleaved = (float*)calloc(16384, sizeof(float));
     }
 
+    if (!_referenceRing) {
+        _referenceRing = std::make_unique<mrt2_au::SidechainReferenceRingBuffer>();
+    }
+#if MRT2_AU_SIDECHAIN_INPUT_BUSES
     _sidechainPull.allocate(self.maximumFramesToRender);
+#endif
     _engine.start();
     return YES;
 }
 
 - (void)deallocateRenderResources {
     _engine.stop();
+#if MRT2_AU_SIDECHAIN_INPUT_BUSES
     _sidechainPull.deallocate();
+#endif
+    _referenceRing.reset();
     if (_resampler) {
         AudioConverterDispose(_resampler);
         _resampler = NULL;
@@ -1159,9 +1181,11 @@ static OSStatus ConverterDataProc(AudioConverterRef inAudioConverter,
                 else if (paramEvent.parameterAddress == kParamAddressFxMode) {
                     const bool fx = paramEvent.value > 0.5f;
                     unsafeSelf->_fxMode.store(fx, std::memory_order_relaxed);
+#if MRT2_AU_SIDECHAIN_INPUT_BUSES
                     unsafeSelf->_sidechainBus.enabled = fx;
+#endif
                     if (fx) {
-                        unsafeSelf->_referenceRing.clear();
+                        if (unsafeSelf->_referenceRing) unsafeSelf->_referenceRing->clear();
                         unsafeSelf->_referenceEncodeTicks.store(0, std::memory_order_relaxed);
                         for (int n = 0; n < 128; ++n) {
                             engine->set_note_off(static_cast<uint8_t>(n));
@@ -1230,18 +1254,20 @@ static OSStatus ConverterDataProc(AudioConverterRef inAudioConverter,
         }
         wasDawPlaying = isDawPlaying;
 
+#if MRT2_AU_SIDECHAIN_INPUT_BUSES
         // FX mode: pull sidechain reference (parallel routing — never mixed to output).
-        if (unsafeSelf->_fxMode.load(std::memory_order_relaxed) && pullInputBlock) {
+        if (unsafeSelf->_fxMode.load(std::memory_order_relaxed) && pullInputBlock && unsafeSelf->_referenceRing) {
             AUAudioUnitStatus pullStatus = unsafeSelf->_sidechainPull.pull(
                 frameCount, 1, timestamp, pullInputBlock);
             if (pullStatus == noErr) {
-                unsafeSelf->_referenceRing.write(
+                unsafeSelf->_referenceRing->write(
                     unsafeSelf->_sidechainPull.L, unsafeSelf->_sidechainPull.R, frameCount);
                 unsafeSelf->_referenceLevelProcessor.process_block(
                     unsafeSelf->_sidechainPull.L, unsafeSelf->_sidechainPull.R, frameCount);
                 unsafeSelf->_referenceEncodeTicks.fetch_add(1, std::memory_order_relaxed);
             }
         }
+#endif
 
         __unsafe_unretained AUHostMusicalContextBlock musicalContextBlock =
             (__bridge AUHostMusicalContextBlock)(unsafeSelf->_musicalContextBlockPtr);
@@ -2301,7 +2327,9 @@ static BOOL paramIsBool(AUParameterAddress address) {
         return;
     }
 
-    [self tryAutoLoadFromModelsDirectory];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        [self tryAutoLoadFromModelsDirectory];
+    });
 }
 
 - (void)tryAutoLoadFromModelsDirectory {
@@ -2316,7 +2344,7 @@ static BOOL paramIsBool(AUParameterAddress address) {
     NSArray<NSString*>* modelFiles = [MagentaModelManager listLocalModelsInDirectory:modelsDir];
     if (modelFiles.count == 0) {
         if (accessGranted && scopedBase) [scopedBase stopAccessingSecurityScopedResource];
-        [self promptForModelsFolderIfNeeded];
+        [self writeDiskLog:@"tryAutoLoad: No models in folder; use UI onboarding to select a model."];
         return;
     }
 
@@ -2324,7 +2352,9 @@ static BOOL paramIsBool(AUParameterAddress address) {
     NSURL* modelURL = [modelsDir URLByAppendingPathComponent:preferred];
     NSString* mlxfnPath = [self mlxfnPathForModelAtURL:modelURL];
     if (mlxfnPath && [self loadModelAtPath:mlxfnPath]) {
-        [self saveLoadedModelBookmarkForURL:modelURL modelName:preferred];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self saveLoadedModelBookmarkForURL:modelURL modelName:preferred];
+        });
     }
 
     if (accessGranted && scopedBase) {
@@ -2335,9 +2365,7 @@ static BOOL paramIsBool(AUParameterAddress address) {
 - (void)promptForModelsFolderIfNeeded {
     if (_promptedForModelsFolder || MGRTModelsFolderBookmark()) return;
     _promptedForModelsFolder = YES;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self handleSelectDownloadFolder];
-    });
+    [self writeDiskLog:@"promptForModelsFolder: skipped auto folder picker (use UI onboarding)."];
 }
 
 // Loads a model from the resolved mlxfnPath.

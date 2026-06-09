@@ -213,6 +213,9 @@ target_include_directories(mrt2_au PRIVATE
   ${MRT2_COMMON_DIR}/objc
 )
 target_compile_options(mrt2_au PRIVATE -fobjc-arc)
+# Sidechain input buses crash Logic when registered as aumu (Music Device). Re-enable
+# when exposing a separate effect-type AU or validated instrument topology.
+target_compile_definitions(mrt2_au PRIVATE MRT2_AU_SIDECHAIN_INPUT_BUSES=0)
 
 target_link_libraries(mrt2_au PRIVATE
   magentart::core

@@ -46,11 +46,13 @@ The inference engine runs in real-time and expects specific audio configuration 
 
 ## 3. FX Mode (Sidechain Reference) — Logic Pro
 
-FX mode lets you drive generation from **audio on another track** (parallel routing), without inserting the plugin on the reference track. The reference is **not** passed through to the output — only AI-generated audio appears on the MRT2 track.
+> **Note:** Sidechain **input buses are temporarily disabled** on the instrument AU (`aumu`) because they crash Logic at load time. FX Mode still toggles MIDI-off / reference UI in the plugin, but live sidechain capture will return when a validated effect-type AU topology is added.
+
+FX mode is intended to let you drive generation from **audio on another track** (parallel routing), without inserting the plugin on the reference track. The reference is **not** passed through to the output — only AI-generated audio appears on the MRT2 track.
 
 1. **Track A:** Your reference material (drums, loop, etc.). No MRT2 on this track.
-2. **Track B:** Software Instrument track with **MRT2**. Enable **FX Mode** in the plugin UI.
-3. On Track B, open the plugin header **Side Chain** menu and select **Track A** (or a bus feeding the reference).
+2. **Track B:** Software Instrument track with **MRT2**. Enable **FX Mode** in the plugin UI (Note Controls).
+3. On Track B, open the plugin header **Side Chain** menu and select **Track A** (or a bus feeding the reference) — *when sidechain buses are re-enabled*.
 4. Keep **Delay Comp** enabled so Logic aligns the MRT2 track with the rest of the mix.
 5. Mix Track A (dry reference) and Track B (generated output) in parallel.
 
