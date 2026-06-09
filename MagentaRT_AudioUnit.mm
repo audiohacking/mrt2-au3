@@ -274,6 +274,7 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
     std::unique_ptr<mrt2_au::SidechainReferenceRingBuffer> _referenceRing;
     SidechainPullBuffer _sidechainPull;
     std::atomic<bool> _fxMode;
+    std::atomic<float> _fxRefWindow;
     std::atomic<bool> _referenceEncodeInFlight;
     std::atomic<int> _referenceEncodeTicks;
     std::atomic<bool> _syncTempo;
@@ -307,6 +308,7 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
 
     _modelLoaded = NO;
     _fxMode.store(false, std::memory_order_relaxed);
+    _fxRefWindow.store(1.0f, std::memory_order_relaxed);
     _referenceEncodeInFlight.store(false, std::memory_order_relaxed);
     _referenceEncodeTicks.store(0, std::memory_order_relaxed);
     _syncTempo.store(false, std::memory_order_relaxed);
@@ -503,6 +505,9 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
         else if (param.address == 46) weakSelf->_engine.set_onset_mode(value > 0.5f);
         else if (param.address == 48) weakSelf->_engine.set_cfg_drums(value);
         else if (param.address == 47) weakSelf->_engine.set_seed_rotation((int)value);
+        else if (param.address == kParamAddressFxRefWindow) {
+            weakSelf->_fxRefWindow.store(value, std::memory_order_relaxed);
+        }
         else if (param.address == kParamAddressFxMode) {
             const bool fx = value > 0.5f;
             weakSelf->_fxMode.store(fx, std::memory_order_relaxed);
@@ -553,8 +558,7 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
         else if (param.address == 47) return (AUValue)weakSelf->_engine.get_seed_rotation();
         else if (param.address == kParamAddressFxMode) return weakSelf->_fxMode.load(std::memory_order_relaxed) ? 1.0f : 0.0f;
         else if (param.address == kParamAddressFxRefWindow) {
-            AUParameter* p = [weakSelf->_parameterTree parameterWithAddress:kParamAddressFxRefWindow];
-            return p ? p.value : 1.0f;
+            return weakSelf->_fxRefWindow.load(std::memory_order_relaxed);
         }
         else if (param.address == kParamAddressSyncTempo) return weakSelf->_syncTempo.load(std::memory_order_relaxed) ? 1.0f : 0.0f;
         else if (param.address == kParamAddressBpmAlign) return weakSelf->_bpmAlign.load(std::memory_order_relaxed) ? 1.0f : 0.0f;
@@ -687,8 +691,7 @@ static size_t FxReferenceWindowSamples(AUValue windowIndex) {
 
     if (!_referenceRing) return;
     const size_t filled = _referenceRing->filled_samples();
-    AUParameter* windowParam = [_parameterTree parameterWithAddress:kParamAddressFxRefWindow];
-    const size_t windowSamples = FxReferenceWindowSamples(windowParam ? windowParam.value : 1.0f);
+    const size_t windowSamples = FxReferenceWindowSamples(_fxRefWindow.load(std::memory_order_relaxed));
     if (filled < windowSamples / 4) return; // wait for at least 25% of window
 
     _referenceEncodeInFlight.store(true, std::memory_order_relaxed);
