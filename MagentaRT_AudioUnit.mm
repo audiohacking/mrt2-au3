@@ -112,6 +112,42 @@ struct SidechainPullBuffer {
     }
 };
 
+#if MRT2_AU_SIDECHAIN_INPUT_BUSES
+/// Pull sidechain audio from the host. Logic routes sidechain to input bus 0 on
+/// instrument plugins; try bus 1 as a fallback for hosts that keep a dummy bus 0.
+static BOOL MRT2PullSidechainInput(SidechainPullBuffer* pullBuffer,
+                                   AUAudioFrameCount frameCount,
+                                   const AudioTimeStamp* timestamp,
+                                   AURenderPullInputBlock pullInputBlock,
+                                   NSInteger inputBusCount,
+                                   float* outPeak) {
+    if (!pullBuffer || !pullInputBlock || frameCount == 0 || inputBusCount <= 0) {
+        if (outPeak) *outPeak = 0.0f;
+        return NO;
+    }
+
+    const NSInteger buses[] = {0, 1};
+    float bestPeak = 0.0f;
+    BOOL pulled = NO;
+
+    for (NSInteger bus : buses) {
+        if (bus >= inputBusCount) continue;
+        const AUAudioUnitStatus status = pullBuffer->pull(frameCount, bus, timestamp, pullInputBlock);
+        if (status != noErr) continue;
+
+        const float peak = mrt2_au::peak_stereo_block(pullBuffer->L, pullBuffer->R, frameCount);
+        if (peak >= bestPeak) {
+            bestPeak = peak;
+            pulled = YES;
+            if (peak > 0.0001f) break; // prefer the first bus with real signal
+        }
+    }
+
+    if (outPeak) *outPeak = bestPeak;
+    return pulled;
+}
+#endif
+
 static BOOL isDevServerRunning(void) {
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return NO;
@@ -297,7 +333,6 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
     AUAudioUnitBus* _outputBus;
     AUAudioUnitBusArray* _outputBusArray;
 #if MRT2_AU_SIDECHAIN_INPUT_BUSES
-    AUAudioUnitBus* _dummyInputBus;
     AUAudioUnitBus* _sidechainBus;
     AUAudioUnitBusArray* _inputBusArray;
 #endif
@@ -326,6 +361,9 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
     std::atomic<float> _fxRefWindow;
     std::atomic<bool> _referenceEncodeInFlight;
     std::atomic<int> _referenceEncodeTicks;
+    float _lastEncodedSidechainPeak;
+    std::atomic<uint32_t> _sidechainPullOkTicks;
+    std::atomic<uint32_t> _sidechainPullFailTicks;
     std::atomic<bool> _syncTempo;
     std::atomic<bool> _bpmAlign;
     std::atomic<double> _hostTempoBpm;
@@ -361,6 +399,9 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
     _fxRefWindow.store(1.0f, std::memory_order_relaxed);
     _referenceEncodeInFlight.store(false, std::memory_order_relaxed);
     _referenceEncodeTicks.store(0, std::memory_order_relaxed);
+    _lastEncodedSidechainPeak = 0.0f;
+    _sidechainPullOkTicks.store(0, std::memory_order_relaxed);
+    _sidechainPullFailTicks.store(0, std::memory_order_relaxed);
     _syncTempo.store(false, std::memory_order_relaxed);
     _bpmAlign.store(false, std::memory_order_relaxed);
     _hostTempoBpm.store(0.0, std::memory_order_relaxed);
@@ -567,10 +608,14 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
             if (fx) {
                 if (weakSelf->_referenceRing) weakSelf->_referenceRing->clear();
                 weakSelf->_referenceEncodeTicks.store(0, std::memory_order_relaxed);
+                weakSelf->_lastEncodedSidechainPeak = 0.0f;
+                weakSelf->_sidechainPullOkTicks.store(0, std::memory_order_relaxed);
+                weakSelf->_sidechainPullFailTicks.store(0, std::memory_order_relaxed);
                 for (int n = 0; n < 128; ++n) {
                     weakSelf->_engine.set_note_off(static_cast<uint8_t>(n));
                     weakSelf->_midiNotes[n].store(false, std::memory_order_relaxed);
                 }
+                [weakSelf applyFxModeActivation];
             }
         }
         else if (param.address == kParamAddressSyncTempo) {
@@ -629,15 +674,7 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
                                                                busses:@[_outputBus]];
 
 #if MRT2_AU_SIDECHAIN_INPUT_BUSES
-    // Sidechain input buses: dummy bus 0 (disabled) + sidechain bus 1 for Logic Pro routing.
-    _dummyInputBus = [[AUAudioUnitBus alloc] initWithFormat:format error:&busError];
-    if (busError) {
-        if (outError) *outError = busError;
-        return nil;
-    }
-    _dummyInputBus.name = @"Input";
-    _dummyInputBus.enabled = NO;
-
+    // Single sidechain input on bus 0 — Logic routes the Side Chain menu here on aumu.
     _sidechainBus = [[AUAudioUnitBus alloc] initWithFormat:format error:&busError];
     if (busError) {
         if (outError) *outError = busError;
@@ -648,7 +685,7 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
 
     _inputBusArray = [[AUAudioUnitBusArray alloc] initWithAudioUnit:self
                                                             busType:AUAudioUnitBusTypeInput
-                                                             busses:@[_dummyInputBus, _sidechainBus]];
+                                                             busses:@[_sidechainBus]];
 #endif
 
     // init_assets runs only on MRT2BootstrapQueue (see ensureAssetsInitialized / connectToAU).
@@ -719,6 +756,75 @@ static NSString* MGRTPreferredModelName(NSArray<NSString*>* modelFiles) {
     return _fxMode.load(std::memory_order_relaxed);
 }
 
+- (size_t)sidechainRingFilledSamples {
+    return _referenceRing ? _referenceRing->filled_samples() : 0;
+}
+
+- (uint32_t)sidechainPullOkTicks {
+    return _sidechainPullOkTicks.load(std::memory_order_relaxed);
+}
+
+- (uint32_t)sidechainPullFailTicks {
+    return _sidechainPullFailTicks.load(std::memory_order_relaxed);
+}
+
+- (void)readReferenceRingPeaks:(float*)outLeft right:(float*)outRight {
+    if (outLeft) *outLeft = 0.0f;
+    if (outRight) *outRight = 0.0f;
+    if (!_referenceRing) return;
+
+    const size_t n = std::min(_referenceRing->filled_samples(), (size_t)4096);
+    if (n == 0) return;
+
+    std::vector<float> L(n), R(n);
+    if (_referenceRing->read_recent(L.data(), R.data(), n) == 0) return;
+
+    float peakL = 0.0f;
+    float peakR = 0.0f;
+    for (size_t i = 0; i < n; ++i) {
+        peakL = std::max(peakL, std::abs(L[i]));
+        peakR = std::max(peakR, std::abs(R[i]));
+    }
+    if (outLeft) *outLeft = peakL;
+    if (outRight) *outRight = peakR;
+}
+
+- (void)restoreFxModeIfEnabled {
+    AUParameter* fxParam = [_parameterTree parameterWithAddress:kParamAddressFxMode];
+    if (!fxParam || fxParam.value <= 0.5f) return;
+    _fxMode.store(true, std::memory_order_relaxed);
+#if MRT2_AU_SIDECHAIN_INPUT_BUSES
+    _sidechainBus.enabled = YES;
+#endif
+    [self applyFxModeActivation];
+}
+
+- (void)applyFxModeActivation {
+    if (!_fxMode.load(std::memory_order_relaxed)) return;
+
+#if MRT2_AU_SIDECHAIN_INPUT_BUSES
+    _sidechainBus.enabled = YES;
+#endif
+    _engine.set_midi_gate_enabled(false);
+    AUParameter* gateParam = [_parameterTree parameterWithAddress:45];
+    if (gateParam) gateParam.value = 0.0f;
+
+    const bool syncTempo = _syncTempo.load(std::memory_order_relaxed);
+    for (int i = 0; i < 6; ++i) {
+        float w = 0.0f;
+        if (i == kFxReferencePromptIndex) {
+            w = syncTempo ? (1.0f - kBpmPromptWeight) : 1.0f;
+        } else if (syncTempo && i == kBpmPromptSlotIndex) {
+            w = kBpmPromptWeight;
+        }
+        AUParameter* wp = [_parameterTree parameterWithAddress:10 + i];
+        if (wp) wp.value = w;
+        _engine.set_blend_weight(i, w);
+    }
+
+    [self applyMergedPromptsToEngine];
+}
+
 - (BOOL)hasInitializedAssets {
     return _modelLoaded;
 }
@@ -784,6 +890,14 @@ static size_t FxReferenceWindowSamples(AUValue windowIndex) {
         return;
     }
 
+    const float capturePeak = mrt2_au::peak_stereo_block(stereoL.data(), stereoR.data(), copied);
+    if (_lastEncodedSidechainPeak > 0.0f &&
+        std::abs(capturePeak - _lastEncodedSidechainPeak) < 0.02f) {
+        _referenceEncodeInFlight.store(false, std::memory_order_relaxed);
+        return;
+    }
+    _lastEncodedSidechainPeak = capturePeak;
+
     __weak MagentaRTAudioUnit* weakSelf = self;
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         std::vector<float> mono16k((copied / 3) + 1);
@@ -809,16 +923,24 @@ static size_t FxReferenceWindowSamples(AUValue windowIndex) {
 - (void)applyMergedPromptsToEngine {
     if (!_engine.is_loaded()) return;
 
+    const bool fxMode = _fxMode.load(std::memory_order_relaxed);
     const bool syncTempo = _syncTempo.load(std::memory_order_relaxed);
     const int maxUserSlots = syncTempo ? kBpmPromptSlotIndex : 6;
 
     std::vector<std::string> texts(6);
     std::vector<float> weights(6, 0.0f);
 
+    if (fxMode) {
+        // Slot 0 is owned by the live sidechain MusicCoCa encoder — never overwrite with text.
+        texts[kFxReferencePromptIndex] = "";
+        weights[kFxReferencePromptIndex] = syncTempo ? (1.0f - kBpmPromptWeight) : 1.0f;
+    }
+
     NSArray* userPrompts = self.prompts;
     const NSUInteger userCount = userPrompts ? userPrompts.count : 0;
     float userWeightSum = 0.0f;
     for (int i = 0; i < maxUserSlots; ++i) {
+        if (fxMode && i == kFxReferencePromptIndex) continue;
         if ((NSUInteger)i >= userCount) break;
         NSDictionary* p = userPrompts[i];
         NSString* text = p[@"text"];
@@ -1273,10 +1395,12 @@ static OSStatus ConverterDataProc(AudioConverterRef inAudioConverter,
                     if (fx) {
                         if (unsafeSelf->_referenceRing) unsafeSelf->_referenceRing->clear();
                         unsafeSelf->_referenceEncodeTicks.store(0, std::memory_order_relaxed);
+                        unsafeSelf->_lastEncodedSidechainPeak = 0.0f;
                         for (int n = 0; n < 128; ++n) {
                             engine->set_note_off(static_cast<uint8_t>(n));
                             unsafeSelf->_midiNotes[n].store(false, std::memory_order_relaxed);
                         }
+                        engine->set_midi_gate_enabled(false);
                     }
                 }
                 else if (paramEvent.parameterAddress == kParamAddressSyncTempo) {
@@ -1342,15 +1466,25 @@ static OSStatus ConverterDataProc(AudioConverterRef inAudioConverter,
 
 #if MRT2_AU_SIDECHAIN_INPUT_BUSES
         // FX mode: pull sidechain reference (parallel routing — never mixed to output).
-        if (unsafeSelf->_fxMode.load(std::memory_order_relaxed) && pullInputBlock && unsafeSelf->_referenceRing) {
-            AUAudioUnitStatus pullStatus = unsafeSelf->_sidechainPull.pull(
-                frameCount, 1, timestamp, pullInputBlock);
-            if (pullStatus == noErr) {
-                unsafeSelf->_referenceRing->write(
-                    unsafeSelf->_sidechainPull.L, unsafeSelf->_sidechainPull.R, frameCount);
-                unsafeSelf->_referenceLevelProcessor.process_block(
-                    unsafeSelf->_sidechainPull.L, unsafeSelf->_sidechainPull.R, frameCount);
-                unsafeSelf->_referenceEncodeTicks.fetch_add(1, std::memory_order_relaxed);
+        if (unsafeSelf->_fxMode.load(std::memory_order_relaxed) && unsafeSelf->_referenceRing) {
+            if (pullInputBlock) {
+                float pullPeak = 0.0f;
+                const NSInteger inputBusCount = unsafeSelf->_inputBusArray.count;
+                const BOOL pulled = MRT2PullSidechainInput(
+                    &unsafeSelf->_sidechainPull, frameCount, timestamp, pullInputBlock,
+                    inputBusCount, &pullPeak);
+                if (pulled) {
+                    unsafeSelf->_referenceRing->write(
+                        unsafeSelf->_sidechainPull.L, unsafeSelf->_sidechainPull.R, frameCount);
+                    unsafeSelf->_referenceLevelProcessor.process_block(
+                        unsafeSelf->_sidechainPull.L, unsafeSelf->_sidechainPull.R, frameCount);
+                    unsafeSelf->_referenceEncodeTicks.fetch_add(1, std::memory_order_relaxed);
+                    unsafeSelf->_sidechainPullOkTicks.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    unsafeSelf->_sidechainPullFailTicks.fetch_add(1, std::memory_order_relaxed);
+                }
+            } else {
+                unsafeSelf->_sidechainPullFailTicks.fetch_add(1, std::memory_order_relaxed);
             }
         }
 #endif
@@ -1371,7 +1505,9 @@ static OSStatus ConverterDataProc(AudioConverterRef inAudioConverter,
                     unsafeSelf->_sampleOffsetToNextBeat.store(
                         static_cast<int>(sampleOffsetToNextBeat), std::memory_order_relaxed);
                 }
-                if (currentBeatPosition == 0.0 && !wasBeatZero) {
+                // In FX mode, looping/rewinding to beat 0 should not wipe transformer context.
+                if (!unsafeSelf->_fxMode.load(std::memory_order_relaxed) &&
+                    currentBeatPosition == 0.0 && !wasBeatZero) {
                     engine->trigger_transport_reset();
                 }
                 wasBeatZero = (currentBeatPosition == 0.0);
@@ -1707,9 +1843,22 @@ static NSString* bankFilePathAU(int index) {
         float refL = 0.0f;
         float refR = 0.0f;
         [au readReferenceLevels:&refL right:&refR];
+        float ringL = 0.0f;
+        float ringR = 0.0f;
+        [au readReferenceRingPeaks:&ringL right:&ringR];
         stateUpdate[@"referenceLevels"] = @{
-            @"left": @(refL),
-            @"right": @(refR)
+            @"left": @(std::max(refL, ringL)),
+            @"right": @(std::max(refR, ringR)),
+        };
+        const size_t ringFilled = [au sidechainRingFilledSamples];
+        const size_t windowSamples = FxReferenceWindowSamples(
+            [_audioUnit.parameterTree parameterWithAddress:kParamAddressFxRefWindow].value);
+        stateUpdate[@"sidechainStatus"] = @{
+            @"ringFill": @(ringFilled),
+            @"ringTarget": @(windowSamples),
+            @"pullOk": @([au sidechainPullOkTicks]),
+            @"pullFail": @([au sidechainPullFailTicks]),
+            @"hasSignal": @(std::max(std::max(refL, refR), std::max(ringL, ringR)) > 0.001f),
         };
         _fxEncodeCounter++;
         if (_fxEncodeCounter >= 50) {
@@ -1950,6 +2099,10 @@ static BOOL paramIsBool(AUParameterAddress address) {
 
     MGRTEnsureCustomResourcesPath();
     stateUpdate[@"resourcesMissing"] = @(!MGRTSharedResourcesAvailable(mrtAu));
+
+    if (mrtAu) {
+        [mrtAu restoreFxModeIfEnabled];
+    }
 
     [self sendStateUpdate:stateUpdate];
     [self handleListLocalModels];

@@ -55,7 +55,9 @@ FX mode lets you drive generation from **audio on another track** (parallel rout
 4. Keep **Delay Comp** enabled so Logic aligns the MRT2 track with the rest of the mix.
 5. Mix Track A (dry reference) and Track B (generated output) in parallel.
 
-The live sidechain reference updates **Prompt 1** (first prompt slot) via MusicCoCa encoding every ~2 seconds.
+The live sidechain reference updates **Prompt 1** (first prompt slot) via MusicCoCa style encoding every ~2 seconds when the captured audio changes. The **Reference** meter in FX Mode shows sidechain input level; if it stays flat, re-check the plugin header **Side Chain** assignment and ensure the DAW transport is running (the instrument render callback must be active to pull sidechain audio).
+
+Sidechain audio arrives on **input bus 0** (`Sidechain`). MIDI Gate is turned off automatically in FX Mode.
 
 ---
 

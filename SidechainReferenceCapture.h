@@ -80,12 +80,39 @@ public:
         return std::min(filled_.load(std::memory_order_acquire), kCapacity);
     }
 
+    /// Peak absolute sample across the most recent `max_samples` stereo frames.
+    static float peak_recent(const float* outL, const float* outR, size_t count) {
+        float peak = 0.0f;
+        for (size_t i = 0; i < count; ++i) {
+            peak = std::max(peak, std::max(std::abs(outL[i]), std::abs(outR[i])));
+        }
+        return peak;
+    }
+
+    float peak_recent_samples(size_t max_samples) const {
+        const size_t n = std::min(filled_samples(), max_samples);
+        if (n == 0) return 0.0f;
+        std::vector<float> L(n), R(n);
+        if (read_recent(L.data(), R.data(), n) == 0) return 0.0f;
+        return peak_recent(L.data(), R.data(), n);
+    }
+
 private:
     std::vector<float> left_;
     std::vector<float> right_;
     std::atomic<size_t> write_pos_{0};
     std::atomic<size_t> filled_{0};
 };
+
+/// Peak absolute stereo sample in an interleaved render block.
+inline float peak_stereo_block(const float* inL, const float* inR, size_t inFrames) {
+    if (!inL || !inR || inFrames == 0) return 0.0f;
+    float peak = 0.0f;
+    for (size_t i = 0; i < inFrames; ++i) {
+        peak = std::max(peak, std::max(std::abs(inL[i]), std::abs(inR[i])));
+    }
+    return peak;
+}
 
 /// Downmix stereo 48 kHz to mono 16 kHz (3:1 decimation, averaged channels).
 inline size_t downmix_resample_to_16k_mono(const float* inL, const float* inR, size_t inFrames,

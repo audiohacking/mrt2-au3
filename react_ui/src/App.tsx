@@ -148,6 +148,9 @@ export default function App() {
     rightLevel: 0,
     refLeftLevel: 0,
     refRightLevel: 0,
+    sidechainHasSignal: false,
+    sidechainRingFill: 0,
+    sidechainRingTarget: 0,
     droppedFrames: 0,
     transportFlags: -1,
     hostBpm: 0,
@@ -448,6 +451,14 @@ export default function App() {
           ...m,
           refLeftLevel: state.referenceLevels.left,
           refRightLevel: state.referenceLevels.right,
+        }));
+      }
+      if (state.sidechainStatus) {
+        setMetrics(m => ({
+          ...m,
+          sidechainHasSignal: !!state.sidechainStatus.hasSignal,
+          sidechainRingFill: state.sidechainStatus.ringFill ?? 0,
+          sidechainRingTarget: state.sidechainStatus.ringTarget ?? 0,
         }));
       }
       if (state.hostBpm !== undefined) {
@@ -1125,6 +1136,11 @@ export default function App() {
                     <span style={{ fontSize: '11px', opacity: 0.7, minWidth: '72px' }}>Reference</span>
                     <AudioMeter leftLevel={metrics.refLeftLevel} rightLevel={metrics.refRightLevel} />
                   </div>
+                  <p style={{ margin: 0, fontSize: '10px', lineHeight: 1.4, opacity: metrics.sidechainHasSignal ? 0.85 : 0.55 }}>
+                    {metrics.sidechainHasSignal
+                      ? `Sidechain input detected (${Math.round(100 * metrics.sidechainRingFill / Math.max(metrics.sidechainRingTarget, 1))}% of capture window)`
+                      : 'No sidechain signal yet — enable FX Mode, start playback, and assign Side Chain in the plugin header.'}
+                  </p>
                   <MagentaSlider
                     label="Window"
                     tooltip="Length of sidechain audio used to update the live style reference."
@@ -1178,7 +1194,10 @@ export default function App() {
                 <ForkMagentaToggle
                   label="FX Mode"
                   checked={params.fxmode}
-                  onChange={(v) => sendParamChange(49, v ? 1 : 0)}
+                  onChange={(v) => {
+                    sendParamChange(49, v ? 1 : 0);
+                    if (v) sendParamChange(45, 0);
+                  }}
                   tooltip="Use a sidechain reference from another track instead of MIDI. Route reference audio via Logic's Side Chain menu on this track."
                 />
               )}
